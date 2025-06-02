@@ -7,6 +7,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/moment@2.29.1/moment.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-moment"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial@0.2.1/dist/chartjs-chart-financial.min.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         :root {
@@ -413,14 +414,23 @@
         <div class="dashboard">
             <div class="main-content">
                 <div class="chart-container">
-                    <div class="chart-header">
+                    <div class="chart-header" style="display: flex; justify-content: space-between; align-items: center;">
                         <div class="chart-title">Market Price - USD/JPY</div>
-                        <div class="timeframe-selector">
-                            <button class="time-btn active">1H</button>
-                            <button class="time-btn">4H</button>
-                            <button class="time-btn">1D</button>
-                            <button class="time-btn">1W</button>
-                            <button class="time-btn">1M</button>
+                        <div style="display: flex; align-items: center;"> <!-- Wrapper for selectors -->
+                            <div class="timeframe-selector">
+                                <button class="time-btn active" data-timeframe="1H">1H</button>
+                                <button class="time-btn" data-timeframe="4H">4H</button>
+                                <button class="time-btn" data-timeframe="1D">1D</button>
+                                <button class="time-btn" data-timeframe="1W">1W</button>
+                                <button class="time-btn" data-timeframe="1M">1M</button>
+                            </div>
+                            <div class="chart-type-selector" style="margin-left: 20px;">
+                                <label for="chartTypeSelect" style="font-size: 14px; color: var(--gray); margin-right: 5px;">Type:</label>
+                                <select id="chartTypeSelect" style="background: var(--dark); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; color: var(--light); font-size: 14px;">
+                                    <option value="tick">Line</option>
+                                    <option value="ohlcv">Candles</option>
+                                </select>
+                            </div>
                         </div>
                     </div>
                     <canvas id="priceChart"></canvas>
@@ -647,40 +657,70 @@
             }
         }
 
-        function updateCharts(data, symbol) { // Added symbol parameter
-            if (!data || typeof data !== 'object') {
-                console.error('UpdateCharts: Invalid or missing data object');
-                // Optionally display a message on charts: e.g., by clearing them or showing "No data"
-                // Example: document.getElementById('priceChart').parentElement.innerHTML = '<p style="color:var(--danger);">Chart data unavailable.</p>';
-                return;
+        function updateCharts(apiData, currentSymbol) {
+            const chartType = apiData.current_chart_type;
+            const granularitySeconds = apiData.current_granularity_seconds;
+
+            const priceCtx = document.getElementById('priceChart').getContext('2d');
+
+            if (window.priceChartInstance) {
+                window.priceChartInstance.destroy();
             }
 
-            const requiredArrays = ['timestamps', 'prices', 'rsi', 'macd', 'bollinger_upper', 'bollinger_middle', 'bollinger_lower', 'stochastic', 'volumes'];
-            for (const key of requiredArrays) {
-                if (!data[key] || !Array.isArray(data[key])) {
-                    console.error(`UpdateCharts: Missing or invalid data array for '${key}' in data:`, data);
-                    // Potentially clear the specific chart or show "Data unavailable" on it
-                    // For now, we'll let it try to render and fail per chart if specific data is bad,
-                    // but this check prevents total failure if a key is missing entirely.
-                    // Individual chart try-catch blocks will handle rendering errors.
-                    // You might want to return here or handle this more gracefully.
-                    // For example, clear all charts or show a general "incomplete data" message.
-                    // If a chart expects data[key] and it's not an array, it will likely error in its try-catch.
-                }
-            }
+            if (chartType === 'ohlcv' && apiData.ohlcv_candles && apiData.ohlcv_candles.length > 0) {
+                const ohlcData = apiData.ohlcv_candles.map(candle => ({
+                    x: candle.time,
+                    o: candle.open,
+                    h: candle.high,
+                    l: candle.low,
+                    c: candle.close
+                }));
 
-            // Update only the main price chart, other small charts are removed.
-            // Price Chart
-            try {
-                const priceCtx = document.getElementById('priceChart').getContext('2d');
-                if (window.priceChartInstance) window.priceChartInstance.destroy();
+                let timeUnit = 'minute';
+                if (granularitySeconds >= 86400) timeUnit = 'day';
+                else if (granularitySeconds >= 3600) timeUnit = 'hour';
+
+                window.priceChartInstance = new Chart(priceCtx, {
+                    type: 'candlestick',
+                    data: {
+                        datasets: [{
+                            label: `${currentSymbol} OHLCV`,
+                            data: ohlcData,
+                            color: { // Example styling for candlestick colors
+                                up: 'rgba(34, 197, 94, 1)', // --success
+                                down: 'rgba(239, 68, 68, 1)', // --danger
+                                unchanged: 'rgba(148, 163, 184, 1)' // --gray
+                            }
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            x: {
+                                type: 'time',
+                                time: { unit: timeUnit },
+                                adapters: { date: { locale: moment.locale() } },
+                                grid: { display: false }
+                            },
+                            y: {
+                                grid: { color: 'rgba(255, 255, 255, 0.05)' },
+                            }
+                        },
+                        plugins: {
+                            legend: { display: true, labels: { color: 'var(--light)'} },
+                            tooltip: { mode: 'index', intersect: false }
+                        }
+                    }
+                });
+            } else if (chartType === 'tick' && apiData.timestamps && apiData.prices && apiData.timestamps.length > 0) {
                 window.priceChartInstance = new Chart(priceCtx, {
                     type: 'line',
                     data: {
-                        labels: data.timestamps,
+                        labels: apiData.timestamps,
                         datasets: [{
-                        label: symbol || 'Price', // Use passed symbol or default
-                            data: data.prices,
+                            label: `${currentSymbol} Price (Tick)`,
+                            data: apiData.prices,
                             borderColor: '#3b82f6',
                             backgroundColor: 'rgba(59, 130, 246, 0.1)',
                             borderWidth: 2,
@@ -693,23 +733,46 @@
                         responsive: true,
                         maintainAspectRatio: false,
                         scales: {
-                            x: { type: 'time', time: { unit: 'minute' }, grid: { display: false } },
-                            y: { grid: { color: 'rgba(255, 255, 255, 0.05)' } }
+                            x: {
+                                type: 'time',
+                                time: { unit: 'minute' },
+                                adapters: { date: { locale: moment.locale() } },
+                                grid: { display: false }
+                            },
+                            y: {
+                                grid: { color: 'rgba(255, 255, 255, 0.05)' }
+                            }
                         },
-                        plugins: { legend: { display: false } }
+                        plugins: {
+                            legend: { display: true, labels: { color: 'var(--light)'} },
+                            tooltip: { mode: 'index', intersect: false }
+                        }
                     }
                 });
-            } catch (e) {
-                console.error("Error rendering Price Chart:", e);
-                // Optionally display a message on the chart area
-                // document.getElementById('priceChart').parentElement.innerHTML = '<p style="color:var(--danger); text-align:center; padding-top: 50px;">Price chart data unavailable.</p>';
+            } else {
+                console.warn('Chart type not recognized or insufficient data to render main chart.', chartType, apiData);
+                // Optionally clear canvas or show "No data" message
+                if (window.priceChartInstance) window.priceChartInstance.destroy(); // Ensure it's blank
+                 priceCtx.clearRect(0, 0, priceCtx.canvas.width, priceCtx.canvas.height); // Clear canvas
+                 priceCtx.fillStyle = 'var(--gray)';
+                 priceCtx.textAlign = 'center';
+                 priceCtx.fillText("No data to display for selected chart type/timeframe.", priceCtx.canvas.width / 2, priceCtx.canvas.height / 2);
             }
-
-            // RSI Chart, MACD Chart, Bollinger Bands Chart, Volume Chart, Stochastic Chart instances are removed
-            // as their canvases were deleted in the previous step.
         }
 
         document.addEventListener('DOMContentLoaded', async function() {
+            // Register financial chart types
+            if (typeof Chart !== 'undefined' && Chart.FinancialController) { // For chartjs-chart-financial v0.1.x
+                 Chart.register(Chart.FinancialController, Chart.OhlcController, Chart.CandlestickController, Chart.OhlcElement, Chart.CandlestickElement);
+                 console.log('Financial chart types registered (v0.1.x style).');
+            } else if (typeof Chart !== 'undefined' && Chart.controllers && Chart.controllers.candlestick) { // For chartjs-chart-financial v0.2.x+
+                 // For v0.2.0 and later, it might auto-register or be part of the main Chart object upon import.
+                 // If using <script> tag, it should auto-register.
+                 console.log('Financial chart types assumed to be registered (v0.2.x+ style or auto-registered).');
+            } else {
+                 console.warn('chartjs-chart-financial controllers not found or failed to register. Candlestick charts may not work.');
+            }
+
             // Add connection status indicator
             let connectionStatus = document.createElement('span');
             connectionStatus.id = 'connectionStatus';
@@ -954,6 +1017,79 @@
                 }
             });
             updateAnalysisTable(initialEmptyDataForTable);
+
+            // Initialize chart controls and add event listeners
+            const chartTypeSelectEl = document.getElementById('chartTypeSelect');
+            const timeframeButtons = document.querySelectorAll('.timeframe-selector .time-btn');
+
+            if (chartTypeSelectEl) {
+                chartTypeSelectEl.value = 'tick'; // Default to 'tick'
+                chartTypeSelectEl.addEventListener('change', function(event) {
+                    const newChartType = event.target.value;
+                    const activeTimeframeButton = document.querySelector('.timeframe-selector .time-btn.active');
+                    const currentTimeframe = activeTimeframeButton ? activeTimeframeButton.dataset.timeframe : '1H'; // Default if somehow none active
+
+                    console.log(`Chart type changed to: ${newChartType}, current timeframe: ${currentTimeframe}`);
+                    setStatus(`Loading ${newChartType === 'ohlcv' ? 'Candlestick' : 'Line'} chart...`, 'var(--warning)');
+
+                    fetch('/api/set_chart_settings', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ chart_type: newChartType, timeframe_str: currentTimeframe })
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.status === 'success') {
+                            setStatus(`Chart: ${data.current_chart_type}, Granularity: ${data.current_granularity_seconds}s`, 'var(--gray)');
+                            // PollMarketData will pick up new data. Optionally trigger immediate poll or clear chart.
+                        } else {
+                            console.error('Failed to set chart settings:', data.message);
+                            setStatus(`Error: ${data.message || 'Chart settings update failed.'}`, 'var(--danger)');
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error setting chart settings:', error);
+                        setStatus('Error: Settings update failed (Network).', 'var(--danger)');
+                    });
+                });
+            }
+
+            if (timeframeButtons) {
+                timeframeButtons.forEach(button => {
+                    button.addEventListener('click', function() {
+                        if (this.classList.contains('active')) {
+                            return;
+                        }
+                        const newTimeframe = this.dataset.timeframe;
+                        const currentChartType = chartTypeSelectEl ? chartTypeSelectEl.value : 'tick';
+
+                        console.log(`Timeframe changed to: ${newTimeframe}, current chart type: ${currentChartType}`);
+                        setStatus(`Loading ${newTimeframe} data...`, 'var(--warning)');
+
+                        timeframeButtons.forEach(btn => btn.classList.remove('active'));
+                        this.classList.add('active');
+
+                        fetch('/api/set_chart_settings', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ chart_type: currentChartType, timeframe_str: newTimeframe })
+                        })
+                        .then(response => response.json())
+                        .then(data => {
+                            if (data.status === 'success') {
+                                setStatus(`Chart: ${data.current_chart_type}, Granularity: ${data.current_granularity_seconds}s (${newTimeframe})`, 'var(--gray)');
+                            } else {
+                                console.error('Failed to set chart settings:', data.message);
+                                setStatus(`Error: ${data.message || 'Chart settings update failed.'}`, 'var(--danger)');
+                            }
+                        })
+                        .catch(error => {
+                            console.error('Error setting chart settings:', error);
+                            setStatus('Error: Settings update failed (Network).', 'var(--danger)');
+                        });
+                    });
+                });
+            }
 
             pollMarketData(); // Start polling
 

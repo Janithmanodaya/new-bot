@@ -20,8 +20,15 @@ CORS(app)
 # Thread lock for market_data
 market_data_lock = threading.Lock()
 
+current_chart_type = 'tick'  # Default: 'tick' or 'ohlcv'
+current_granularity_seconds = 60 # Default: e.g., 60 for 1-minute candles
+TIMEFRAME_TO_SECONDS = {
+    '1M': 60, '5M': 300, '15M': 900, '1H': 3600, '4H': 14400, '1D': 86400, '1W': 604800
+}
+
 DEFAULT_MARKET_DATA = {
-    'timestamps': [], 'prices': [], 'volumes': [],
+    'timestamps': [], 'prices': [], 'volumes': [], # For tick chart and general use
+    'ohlcv_candles': [], # For OHLCV chart: list of {'time': ms, 'open': o, 'high': h, 'low': l, 'close': c, 'volume': v}
     'rsi': [], 'macd': [], 'bollinger_upper': [], 'bollinger_middle': [],
     'bollinger_lower': [], 'stochastic': [], 'cci_20': [],
     'sma_10': [], 'sma_20': [], 'sma_30': [], 'sma_50': [], 'sma_100': [], 'sma_200': [],
@@ -29,7 +36,7 @@ DEFAULT_MARKET_DATA = {
     # Signals
     'rsi_signal': 'N/A', 'stochastic_signal': 'N/A', 'macd_signal': 'N/A',
     'cci_20_signal': 'N/A', 'price_ema_50_signal': 'N/A',
-    'market_sentiment_text': 'N/A', # Added in previous step, ensure it's here
+    'market_sentiment_text': 'N/A',
     # Daily data
     'high_24h': 'N/A', 'low_24h': 'N/A', 'volume_24h': 'N/A',
     # Prediction states
@@ -52,475 +59,285 @@ DERIV_SYMBOL_MAPPING = {
     "GBP/USD": "frxGBPUSD",
     "AUD/USD": "frxAUDUSD",
     "USD/CAD": "frxUSDCAD",
-    "BTC/USD": "cryBTCUSD", # Assumption
-    "ETH/USD": "cryETHUSD"  # Assumption
+    "BTC/USD": "cryBTCUSD",
+    "ETH/USD": "cryETHUSD"
 }
 
-SYMBOL = "frxUSDJPY"  # Default symbol, MUST be in Deriv API format
-API_TOKEN = ''  # Set your token here or via environment
-current_tick_subscription_id = None # Store the ID of the active tick subscription
+SYMBOL = "frxUSDJPY"
+API_TOKEN = ''
+current_tick_subscription_id = None
 
 # Helper: Calculate indicators
-
 def calculate_indicators(prices_list: list[float]):
-    """
-    Calculates various technical indicators based on a list of prices.
-    """
     logging.debug(f"calculate_indicators received prices_list length: {len(prices_list)}, last 5: {prices_list[-5:] if len(prices_list) >= 5 else prices_list}")
     if not prices_list:
         logging.warning("[Indicators] Price list is empty. Cannot calculate indicators.")
-        # Return empty lists of the correct structure if prices_list is empty
-        return {
-            'rsi': [], 'macd': [], 'bollinger_upper': [],
-            'bollinger_middle': [], 'bollinger_lower': [], 'stochastic': []
-        }
+        # Return a structure that includes all expected keys, even if empty or default
+        return copy.deepcopy({k: ([] if isinstance(DEFAULT_MARKET_DATA[k], list) else 'N/A') for k in DEFAULT_MARKET_DATA if k not in ['timestamps', 'prices', 'volumes', 'ohlcv_candles']})
 
     prices_series = pd.Series(prices_list, dtype=float)
-    logging.debug(f"[Indicators] Calculating indicators for a series of {len(prices_series)} prices.")
-    logging.debug(f"[Indicators] Prices head: {prices_series.head().tolist()}, Prices tail: {prices_series.tail().tolist()}")
+    results = {} # Initialize results dict for this calculation run
 
     # RSI
     delta = prices_series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-
     rs = gain / loss
-    # Handle division by zero for RS: if loss is 0, RS is effectively infinite (or NaN if gain is also 0)
-    # An RS of infinity means RSI approaches 100. If gain is also 0 (no change), RSI is undefined, 50 is a neutral default.
     rs[loss == 0] = np.inf
-    rs[(gain == 0) & (loss == 0)] = np.nan # Or some other suitable value for RSI to be 50 later
-
+    rs[(gain == 0) & (loss == 0)] = np.nan
     rsi = 100 - (100 / (1 + rs))
-    rsi_series = rsi.fillna(50) # Fill initial NaNs and specific (gain=0, loss=0) NaNs with 50
-    # logging.debug(f"[Indicators] RSI calculated. Head: {rsi_series.head().tolist()}, Tail: {rsi_series.tail().tolist()}") # Original detailed log
-    logging.debug(f"calculate_indicators computed RSI, length: {len(rsi_series)}, last 5: {rsi_series.tolist()[-5:] if len(rsi_series) >= 5 else rsi_series.tolist()}")
-
+    results['rsi'] = rsi.fillna(50).tolist()
+    logging.debug(f"calculate_indicators computed RSI, length: {len(results['rsi'])}, last 5: {results['rsi'][-5:] if len(results['rsi']) >= 5 else results['rsi']}")
 
     # MACD
-    # Using adjust=False for EWMA is common in financial calculations.
-    # This calculates the MACD line. Signal line and histogram are not part of this.
-    logging.debug("[Indicators] MACD: Calculating MACD line (not signal line or histogram).")
     macd_line_series = prices_series.ewm(span=12, adjust=False).mean() - prices_series.ewm(span=26, adjust=False).mean()
-    macd_line_series = macd_line_series.fillna(0) # Fill initial NaNs with 0
-    # logging.debug(f"[Indicators] MACD line calculated. Head: {macd_line_series.head().tolist()}, Tail: {macd_line_series.tail().tolist()}") # Original detailed log
-    logging.debug(f"calculate_indicators computed MACD, length: {len(macd_line_series)}, last 5: {macd_line_series.tolist()[-5:] if len(macd_line_series) >= 5 else macd_line_series.tolist()}")
+    results['macd'] = macd_line_series.fillna(0).tolist()
+    logging.debug(f"calculate_indicators computed MACD, length: {len(results['macd'])}, last 5: {results['macd'][-5:] if len(results['macd']) >= 5 else results['macd']}")
 
     # Bollinger Bands
-    # Using ddof=0 for population standard deviation, common in some platforms.
     bollinger_middle = prices_series.rolling(window=20).mean()
     bollinger_std = prices_series.rolling(window=20).std(ddof=0)
-    bollinger_upper = bollinger_middle + (2 * bollinger_std)
-    bollinger_lower = bollinger_middle - (2 * bollinger_std)
-
-    # fillna(prices_series) for initial values makes the bands follow the price line.
-    # This might not be visually ideal for early data points but maintains current behavior.
-    # Alternatives could be bfill/ffill or np.nan.
-    logging.debug("[Indicators] Bollinger Bands: Using fillna(prices_series) for initial band values.")
-    bollinger_upper = bollinger_upper.fillna(prices_series)
-    bollinger_middle = bollinger_middle.fillna(prices_series)
-    bollinger_lower = bollinger_lower.fillna(prices_series)
-    logging.debug(f"[Indicators] Bollinger Bands calculated. Middle Head: {bollinger_middle.head().tolist()}, Upper Tail: {bollinger_upper.tail().tolist()}")
+    results['bollinger_upper'] = (bollinger_middle + (2 * bollinger_std)).fillna(prices_series).tolist()
+    results['bollinger_middle'] = bollinger_middle.fillna(prices_series).tolist()
+    results['bollinger_lower'] = (bollinger_middle - (2 * bollinger_std)).fillna(prices_series).tolist()
 
     # Stochastic Oscillator (%K)
     low_14 = prices_series.rolling(window=14).min()
     high_14 = prices_series.rolling(window=14).max()
-    # Adding a small epsilon to prevent division by zero if high_14 == low_14
     stochastic_k = 100 * (prices_series - low_14) / (high_14 - low_14 + 1e-9)
-    stochastic_k = stochastic_k.fillna(50) # Fill initial NaNs with 50 (neutral)
-    logging.debug(f"[Indicators] Stochastic Oscillator (%K) calculated. Head: {stochastic_k.head().tolist()}, Tail: {stochastic_k.tail().tolist()}")
-
-
-    results = {
-        'rsi': rsi_series.tolist(),
-        'macd': macd_line_series.tolist(),
-        'bollinger_upper': bollinger_upper.tolist(),
-        'bollinger_middle': bollinger_middle.tolist(),
-        'bollinger_lower': bollinger_lower.tolist(),
-        'stochastic': stochastic_k.tolist()
-    }
+    results['stochastic'] = stochastic_k.fillna(50).tolist()
 
     # SMA Calculations
     sma_periods = [10, 20, 30, 50, 100, 200]
     for N in sma_periods:
-        sma_N = prices_series.rolling(window=N).mean().fillna(0) # Using fillna(0) for now
-        results[f'sma_{N}'] = sma_N.tolist()
-    logging.debug(f"calculate_indicators computed SMAs. Last SMA_200 value: {results.get('sma_200', [])[-1:]}")
+        results[f'sma_{N}'] = prices_series.rolling(window=N).mean().fillna(0).tolist()
 
     # EMA Calculations
     ema_periods = [10, 20, 30, 50, 100, 200]
     for N in ema_periods:
-        ema_N = prices_series.ewm(span=N, adjust=False).mean().fillna(0) # Using fillna(0) for now
-        results[f'ema_{N}'] = ema_N.tolist()
-    logging.debug(f"calculate_indicators computed EMAs. Last EMA_200 value: {results.get('ema_200', [])[-1:]}")
+        results[f'ema_{N}'] = prices_series.ewm(span=N, adjust=False).mean().fillna(0).tolist()
 
-    # CCI (Commodity Channel Index) Calculation (20-period)
+    # CCI (Commodity Channel Index)
     cci_period = 20
-    tp = prices_series # Using close price as Typical Price
+    tp = prices_series
     sma_tp = tp.rolling(window=cci_period).mean()
-    # Calculate Mean Deviation (MD)
-    # For MD, ensure we are calculating the mean of absolute differences from sma_tp over the lookback period.
-    # Pandas rolling apply can be used here, but direct rolling mean of absolute differences is more straightforward if definition aligns.
-    # The common definition is Sum(Abs(TP - SMA_TP)) / N for the MD part of the constant.
-    # Let's use pandas rolling mean on the absolute difference series.
     mean_dev = (tp - sma_tp).abs().rolling(window=cci_period).mean()
-
-    # Constant 0.015 is standard
-    # Handle division by zero for md: if md is 0, cci is effectively infinite or undefined.
-    # Replace inf with a large number or 0, or NaN. Using 0 for now.
     cci = (tp - sma_tp) / (0.015 * mean_dev)
-    cci = cci.replace([np.inf, -np.inf], 0).fillna(0) # Replace inf/(-inf) with 0 and then fill NaNs with 0
+    results['cci_20'] = cci.replace([np.inf, -np.inf], 0).fillna(0).tolist()
 
-    results['cci_20'] = cci.tolist()
-    logging.debug(f"calculate_indicators computed CCI_20, length: {len(results['cci_20'])}, last 5: {results['cci_20'][-5:] if len(results['cci_20']) >= 5 else results['cci_20']}")
-
-    # Signal Generation
-    # Ensure there's enough data to get latest values. prices_series is used for latest_price.
+    # Signal Generation & Prediction States
     if not prices_series.empty:
         latest_price = prices_series.iloc[-1]
 
-        # RSI Signal
-        if results['rsi'] and len(results['rsi']) > 0:
-            latest_rsi = results['rsi'][-1]
-            if latest_rsi < 30: results['rsi_signal'] = 'Buy'
-            elif latest_rsi > 70: results['rsi_signal'] = 'Sell'
-            else: results['rsi_signal'] = 'Neutral'
-        else:
-            results['rsi_signal'] = 'N/A'
+        latest_rsi = results['rsi'][-1] if results['rsi'] else 50
+        results['rsi_signal'] = 'Buy' if latest_rsi < 30 else ('Sell' if latest_rsi > 70 else 'Neutral')
+        results['rsi_prediction_state'] = 'Oversold' if latest_rsi < 30 else ('Overbought' if latest_rsi > 70 else 'Neutral')
 
-        # Stochastic Signal
-        if results['stochastic'] and len(results['stochastic']) > 0:
-            latest_stochastic = results['stochastic'][-1]
-            if latest_stochastic < 20: results['stochastic_signal'] = 'Buy'
-            elif latest_stochastic > 80: results['stochastic_signal'] = 'Sell'
-            else: results['stochastic_signal'] = 'Neutral'
-        else:
-            results['stochastic_signal'] = 'N/A'
+        latest_stochastic = results['stochastic'][-1] if results['stochastic'] else 50
+        results['stochastic_signal'] = 'Buy' if latest_stochastic < 20 else ('Sell' if latest_stochastic > 80 else 'Neutral')
+        results['stochastic_prediction_state'] = 'Oversold' if latest_stochastic < 20 else ('Overbought' if latest_stochastic > 80 else 'Neutral')
 
-        # MACD Signal (MACD line vs. Zero)
-        if results['macd'] and len(results['macd']) > 0:
-            latest_macd = results['macd'][-1]
-            if latest_macd > 0: results['macd_signal'] = 'Buy'
-            elif latest_macd < 0: results['macd_signal'] = 'Sell'
-            else: results['macd_signal'] = 'Neutral'
-        else:
-            results['macd_signal'] = 'N/A'
+        latest_macd = results['macd'][-1] if results['macd'] else 0
+        results['macd_signal'] = 'Buy' if latest_macd > 0 else ('Sell' if latest_macd < 0 else 'Neutral')
+        results['macd_prediction_state'] = 'Bullish' if latest_macd > 0 else ('Bearish' if latest_macd < 0 else 'Neutral')
 
-        # CCI Signal
-        if results['cci_20'] and len(results['cci_20']) > 0:
-            latest_cci = results['cci_20'][-1]
-            if latest_cci < -100: results['cci_signal'] = 'Buy'
-            elif latest_cci > 100: results['cci_signal'] = 'Sell'
-            else: results['cci_signal'] = 'Neutral'
-        else:
-            results['cci_signal'] = 'N/A'
+        latest_cci = results['cci_20'][-1] if results['cci_20'] else 0
+        results['cci_signal'] = 'Buy' if latest_cci < -100 else ('Sell' if latest_cci > 100 else 'Neutral')
+        results['cci_20_prediction_state'] = 'Oversold' if latest_cci < -100 else ('Overbought' if latest_cci > 100 else 'Neutral')
 
-        # Price vs. EMA(50) Signal
-        if results['ema_50'] and len(results['ema_50']) > 0:
-            latest_ema_50 = results['ema_50'][-1]
-            if latest_price > latest_ema_50: results['price_ema_50_signal'] = 'Buy'
-            elif latest_price < latest_ema_50: results['price_ema_50_signal'] = 'Sell'
-            else: results['price_ema_50_signal'] = 'Neutral'
-        else:
-            results['price_ema_50_signal'] = 'N/A'
+        latest_ema_50 = results['ema_50'][-1] if results['ema_50'] else latest_price
+        results['price_ema_50_signal'] = 'Buy' if latest_price > latest_ema_50 else ('Sell' if latest_price < latest_ema_50 else 'Neutral')
     else:
-        # Default signals if no price data
-        results['rsi_signal'] = 'N/A'
-        results['stochastic_signal'] = 'N/A'
-        results['macd_signal'] = 'N/A'
-        results['cci_signal'] = 'N/A'
-        results['price_ema_50_signal'] = 'N/A'
-
-    logging.debug(f"Generated signals: RSI: {results.get('rsi_signal')}, MACD: {results.get('macd_signal')}, Price/EMA50: {results.get('price_ema_50_signal')}")
+        for sig_key in ['rsi_signal', 'stochastic_signal', 'macd_signal', 'cci_signal', 'price_ema_50_signal',
+                        'rsi_prediction_state', 'stochastic_prediction_state', 'macd_prediction_state', 'cci_20_prediction_state']:
+            results[sig_key] = 'N/A'
 
     # Market Sentiment Logic
     signal_keys = ['rsi_signal', 'stochastic_signal', 'macd_signal', 'cci_20_signal', 'price_ema_50_signal']
     active_signals = [results.get(key) for key in signal_keys if results.get(key) and results.get(key) not in ['N/A', 'Neutral']]
-
     buy_count = active_signals.count('Buy')
     sell_count = active_signals.count('Sell')
-
-    if buy_count > sell_count:
-        results['market_sentiment_text'] = 'Bullish'
-    elif sell_count > buy_count:
-        results['market_sentiment_text'] = 'Bearish'
-    else:
-        results['market_sentiment_text'] = 'Neutral'
-
-    logging.debug(f"Sentiment calculation: Buy signals: {buy_count}, Sell signals: {sell_count}, Overall Sentiment: {results['market_sentiment_text']}")
-
-    # Prediction States Generation
-    if not prices_series.empty:
-        # RSI Prediction State
-        if results['rsi'] and len(results['rsi']) > 0:
-            latest_rsi = results['rsi'][-1]
-            if latest_rsi < 30: results['rsi_prediction_state'] = 'Oversold'
-            elif latest_rsi > 70: results['rsi_prediction_state'] = 'Overbought'
-            else: results['rsi_prediction_state'] = 'Neutral'
-        else:
-            results['rsi_prediction_state'] = 'N/A'
-
-        # Stochastic Prediction State
-        if results['stochastic'] and len(results['stochastic']) > 0:
-            latest_stochastic = results['stochastic'][-1]
-            if latest_stochastic < 20: results['stochastic_prediction_state'] = 'Oversold'
-            elif latest_stochastic > 80: results['stochastic_prediction_state'] = 'Overbought'
-            else: results['stochastic_prediction_state'] = 'Neutral'
-        else:
-            results['stochastic_prediction_state'] = 'N/A'
-
-        # MACD Prediction State
-        if results['macd'] and len(results['macd']) > 0:
-            latest_macd = results['macd'][-1]
-            if latest_macd > 0: results['macd_prediction_state'] = 'Bullish'
-            elif latest_macd < 0: results['macd_prediction_state'] = 'Bearish'
-            else: results['macd_prediction_state'] = 'Neutral'
-        else:
-            results['macd_prediction_state'] = 'N/A'
-
-        # CCI Prediction State
-        if results['cci_20'] and len(results['cci_20']) > 0:
-            latest_cci = results['cci_20'][-1]
-            if latest_cci < -100: results['cci_20_prediction_state'] = 'Oversold'
-            elif latest_cci > 100: results['cci_20_prediction_state'] = 'Overbought'
-            else: results['cci_20_prediction_state'] = 'Neutral'
-        else:
-            results['cci_20_prediction_state'] = 'N/A'
-    else:
-        results['rsi_prediction_state'] = 'N/A'
-        results['stochastic_prediction_state'] = 'N/A'
-        results['macd_prediction_state'] = 'N/A'
-        results['cci_20_prediction_state'] = 'N/A'
+    results['market_sentiment_text'] = 'Bullish' if buy_count > sell_count else ('Bearish' if sell_count > buy_count else 'Neutral')
 
     logging.debug(f"Prediction States: RSI: {results.get('rsi_prediction_state')}, Stochastic: {results.get('stochastic_prediction_state')}, MACD: {results.get('macd_prediction_state')}, CCI: {results.get('cci_20_prediction_state')}")
-
-    # Ensure all returned lists are of the same length as the input prices_series
-    # Pandas rolling/ewm operations with default settings should preserve index and length, filling leading values with NaN (before our fillna(0)).
     return results
 
-# WebSocket thread to fetch real data from Deriv
-
+# WebSocket interaction
 ws_thread = None
 ws_app = None
 
-def request_daily_data(ws_app_instance, symbol_to_fetch):
+def request_ohlcv_data(ws_app_instance, symbol_to_fetch, granularity_s, candle_count=100):
     if ws_app_instance and ws_app_instance.sock and ws_app_instance.sock.connected:
-        logging.info(f"Requesting daily OHLCV data for {symbol_to_fetch}...")
-        # Using a unique req_id is best practice
-        req_id_daily = f"daily_{symbol_to_fetch}_{int(time.time())}"
+        req_id_ohlcv = f"ohlcv_{symbol_to_fetch}_{granularity_s}_{int(time.time())}"
+        logging.info(f"Requesting OHLCV data (req_id: {req_id_ohlcv}): {symbol_to_fetch}, Granularity: {granularity_s}s, Count: {candle_count}")
         ws_app_instance.send(json.dumps({
             "ticks_history": symbol_to_fetch,
             "style": "candles",
-            "granularity": 86400, # Daily candles (24 hours * 60 minutes * 60 seconds)
-            "end": "latest",    # Get data up to the latest available tick
-            "count": 1,         # We only need the most recent daily candle data
+            "granularity": int(granularity_s),
+            "end": "latest",
+            "count": int(candle_count),
+            "req_id": req_id_ohlcv
+        }))
+        return req_id_ohlcv
+    else:
+        logging.warning(f"WebSocket not connected. Cannot request OHLCV data for {symbol_to_fetch}.")
+        return None
+
+def request_daily_data(ws_app_instance, symbol_to_fetch):
+    if ws_app_instance and ws_app_instance.sock and ws_app_instance.sock.connected:
+        req_id_daily = f"daily_{symbol_to_fetch}_{int(time.time())}"
+        logging.info(f"Requesting daily summary data (req_id: {req_id_daily}) for {symbol_to_fetch}...")
+        ws_app_instance.send(json.dumps({
+            "ticks_history": symbol_to_fetch,
+            "style": "candles",
+            "granularity": 86400,
+            "end": "latest",
+            "count": 1,
             "req_id": req_id_daily
         }))
     else:
         logging.warning(f"WebSocket not connected. Cannot request daily data for {symbol_to_fetch}.")
 
-# Enhanced WebSocket Handlers
 def on_open_for_deriv(ws):
-    """Called when the WebSocket connection is established."""
-    logging.info(f"WebSocket connection opened. Attempting to subscribe to ticks for SYMBOL: {SYMBOL} or authorize.")
-    request_daily_data(ws, SYMBOL) # Request daily data on new connection
+    logging.info(f"WebSocket connection opened. SYMBOL: {SYMBOL}, Granularity: {current_granularity_seconds}s")
+    request_daily_data(ws, SYMBOL)
+    request_ohlcv_data(ws, SYMBOL, current_granularity_seconds)
     if API_TOKEN:
-        logging.info(f"[Deriv WS] API_TOKEN is present. Attempting to authorize.")
         ws.send(json.dumps({"authorize": API_TOKEN}))
     else:
-        logging.info(f"[Deriv WS] No API_TOKEN provided. Subscribing to public ticks for {SYMBOL}.")
         ws.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
 
 def on_message_for_deriv(ws, message):
-    """Called when a message is received from the WebSocket."""
-    global market_data, SYMBOL, current_tick_subscription_id # Added SYMBOL and subscription ID
+    global market_data, SYMBOL, current_tick_subscription_id, current_chart_type, current_granularity_seconds
     data = json.loads(message)
     msg_type = data.get('msg_type')
-
-    # Basic logging for all messages, can be made more verbose if needed
-    # logging.info(f"[Deriv WS] Received message: {json.dumps(data, indent=2)}")
+    echo_req = data.get('echo_req', {})
+    req_id_received = echo_req.get('req_id')
 
     if msg_type == 'authorize':
-        auth_response = data.get('authorize', {})
         if data.get('error'):
-            logging.error(f"[Deriv WS] Authorization failed: {data['error']['message']}")
-            # Do not subscribe to ticks if authorization fails
+            logging.error(f"Authorization failed: {data['error']['message']}")
         else:
-            loginid = auth_response.get('loginid')
-            logging.info(f"[Deriv WS] Authorization successful for user: {loginid}")
-            # Consider updating SYMBOL if provided in auth_response, though not typical
-            # current_symbol_in_auth = auth_response.get('symbol') # Fictional field for example
-            # if current_symbol_in_auth and current_symbol_in_auth != SYMBOL:
-            #     logging.info(f"[Deriv WS] Symbol updated from {SYMBOL} to {current_symbol_in_auth} based on authorization response.")
-            #     SYMBOL = current_symbol_in_auth
-            logging.info(f"[Deriv WS] Subscribing to ticks for {SYMBOL} after successful authorization.")
+            logging.info(f"Authorization successful for user: {data.get('authorize', {}).get('loginid')}")
             ws.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
-            # Also request daily data after successful authorization
             request_daily_data(ws, SYMBOL)
+            request_ohlcv_data(ws, SYMBOL, current_granularity_seconds)
 
-    elif msg_type == 'subscribe': # Handle subscription confirmation
-        logging.info(f"Full 'subscribe' response: {message}")
+    elif msg_type == 'subscribe':
+        logging.info(f"Full 'subscribe' response: {message[:200]}")
         if data.get('error'):
             logging.error(f"Error in 'subscribe' response: {data['error']}")
         else:
-            subscription = data.get('subscription')
-            if subscription and subscription.get('id'):
-                current_tick_subscription_id = subscription['id']
-                # This specific logging for ID is still useful alongside full message
-                logging.info(f"[Deriv WS] Successfully subscribed with ID: {current_tick_subscription_id}")
-            else:
-                logging.warning(f"[Deriv WS] Received subscription confirmation, but no ID found in data: {data}")
+            sub = data.get('subscription')
+            if sub and sub.get('id'): current_tick_subscription_id = sub['id']
+            logging.info(f"Successfully subscribed to ticks. ID: {current_tick_subscription_id}")
 
     elif msg_type == 'forget':
-        logging.info(f"Full 'forget' response: {message}")
+        logging.info(f"Full 'forget' response: {message[:200]}")
 
     elif msg_type == 'tick':
         tick = data.get('tick')
-        if not tick: # Check if 'tick' object itself is missing
-            logging.error(f"[Deriv WS] Received message with msg_type 'tick' but no 'tick' object: {data}")
+        if not tick or tick.get('epoch') is None or tick.get('quote') is None:
+            logging.error(f"Invalid tick data: {data}")
             return
 
-        epoch = tick.get('epoch')
-        price = tick.get('quote')
-        tick_symbol = tick.get('symbol') # Get symbol from tick data
-
-        if epoch is None:
-            logging.error(f"[Deriv WS] Tick data missing 'epoch': {tick}")
-            return
-        if price is None:
-            logging.error(f"[Deriv WS] Tick data missing 'quote': {tick}")
-            return
-        if tick_symbol is None: # Also good to check for symbol in tick
-            logging.warning(f"[Deriv WS] Tick data missing 'symbol': {tick}") # Warning as we might still process if SYMBOL matches
-
-        # Ensure timestamp conversion is robust
-        try:
-            ts = datetime.fromtimestamp(epoch, timezone.utc)
-        except Exception as e:
-            logging.error(f"[Deriv WS] Error converting epoch '{epoch}' to datetime: {e}")
-            return
-
-        logging.info(f"[Deriv WS] Processing tick: Symbol={tick_symbol}, Price={price}, Timestamp={ts.isoformat()}")
-        
-        # Optionally, ensure the tick received is for the subscribed SYMBOL, if critical
-        # if tick_symbol != SYMBOL:
-        #     logging.warning(f"[Deriv WS] Received tick for symbol {tick_symbol}, but subscribed to {SYMBOL}. Ignoring.")
-        #     return
+        ts = datetime.fromtimestamp(tick['epoch'], timezone.utc)
+        logging.info(f"Processing tick: Symbol={tick.get('symbol')}, Price={tick['quote']}, Time={ts.isoformat()}")
 
         with market_data_lock:
-            try:
+            if current_chart_type == 'tick': # Only update tick data if chart type is 'tick'
                 market_data['timestamps'].append(ts.isoformat())
-                market_data['prices'].append(price) # price is already a float/numeric
-                for k in ['timestamps', 'prices']:
-                    if len(market_data[k]) > 100:
-                        market_data[k] = market_data[k][-100:]
+                market_data['prices'].append(tick['quote'])
+                for k_list in ['timestamps', 'prices']: # Keep only last 100 for tick data
+                    if len(market_data[k_list]) > 100: market_data[k_list] = market_data[k_list][-100:]
 
-                current_prices = market_data['prices'][:] # Use a copy for calculation
-                logging.debug(f"Before indicator calculation for SYMBOL: {SYMBOL} - market_data['prices'] length: {len(market_data['prices'])}, last 5 prices: {market_data['prices'][-5:] if len(market_data['prices']) >= 5 else market_data['prices']}")
+            # Indicators are calculated based on tick prices, regardless of chart type for now
+            # This might change if OHLCV data is to be the source for indicators
+            prices_for_indicators = market_data['prices'] # Use the running list of tick prices
+            if not prices_for_indicators and market_data['ohlcv_candles']: # Fallback if no tick prices but have ohlcv
+                 prices_for_indicators = [c['close'] for c in market_data['ohlcv_candles']]
 
-                updated_indicators = {} # Define to ensure it's available in case of exception
-                try:
-                    updated_indicators = calculate_indicators(current_prices) # Renamed for clarity
-                    logging.debug(f"After indicator calculation for SYMBOL: {SYMBOL} - calculated RSI length: {len(updated_indicators.get('rsi', []))}, last 5 RSI: {updated_indicators.get('rsi', [])[-5:] if len(updated_indicators.get('rsi', [])) >= 5 else updated_indicators.get('rsi', [])}")
-                    logging.debug(f"After indicator calculation for SYMBOL: {SYMBOL} - calculated MACD length: {len(updated_indicators.get('macd', []))}, last 5 MACD: {updated_indicators.get('macd', [])[-5:] if len(updated_indicators.get('macd', [])) >= 5 else updated_indicators.get('macd', [])}")
 
-                    for key, value in updated_indicators.items():
+            if prices_for_indicators:
+                updated_data = calculate_indicators(prices_for_indicators)
+                for key, value in updated_data.items():
+                    if key in market_data: # Ensure key exists in market_data
                         if isinstance(value, list):
-                            # This is an indicator series (e.g., rsi, sma_10)
-                            market_data[key] = value[-100:] # Store last 100 points
-                            logging.debug(f"Updating market_data list '{key}'. Length: {len(market_data[key])}. Last 5: {market_data[key][-5:] if len(market_data[key]) >= 5 else market_data[key]}")
+                            market_data[key] = value[-100:]
                         elif isinstance(value, str):
-                            # This is a signal string (e.g., rsi_signal, macd_signal)
-                            market_data[key] = value # Store the single string value
-                            logging.debug(f"Updating market_data signal '{key}' to: {value}")
-                        else:
-                            logging.warning(f"Unexpected data type for key '{key}' in updated_indicators: {type(value)}")
-                except Exception as e_calc:
-                    logging.error(f"[Deriv WS] Error calling calculate_indicators: {e_calc}", exc_info=True)
-                    # Decide how to handle: skip update for indicators, or clear them, or use last known good
-                    # For now, indicators might become stale or mismatched if error occurs.
+                            market_data[key] = value
+            # Volume update can be independent if needed
+            if 'volumes' in market_data: # Check if 'volumes' key exists
+                 market_data['volumes'].append(np.random.randint(1000,5000)) # Simulated volume
+                 if len(market_data['volumes']) > 100: market_data['volumes'] = market_data['volumes'][-100:]
 
-                if 'volumes' not in market_data or len(market_data['volumes']) < len(market_data['prices']):
-                    market_data['volumes'].append(np.random.randint(1000, 5000))
-                if len(market_data['volumes']) > 100:
-                    market_data['volumes'] = market_data['volumes'][-100:]
-                logging.info("[Deriv WS] Market data updated successfully.")
-            except Exception as e:
-                logging.error(f"[Deriv WS] Error processing tick and updating market_data: {e}")
-            finally:
-                pass # Lock is released automatically by with statement context exit
-            
-    elif msg_type == 'proposal_open_contract':
-        if data.get('error'):
-            logging.error(f"[Deriv WS] Proposal error: {data['error']['message']}")
-        else:
-            logging.info(f"[Deriv WS] Proposal successful: {data.get('proposal_open_contract')}")
-            
-    elif data.get('error'): # This is a general error catcher for messages that have an 'error' field
-        logging.error(f"Deriv API Error received: {data['error']}. Full message: {message}")
+    elif msg_type == 'candles':
+        logging.info(f"Received 'candles' data (req_id: {req_id_received}): {message[:300]}...")
+        candles_data = data.get('candles', [])
         
-    # else:
-        # logging.info(f"[Deriv WS] Received unhandled message type: {msg_type}. Full message: {message}")
-
-    elif data.get('msg_type') == 'candles':
-        # Ideally, match data.get('echo_req', {}).get('req_id') here
-        # with the req_id_daily sent, if we were using a robust req_id system.
-        logging.info(f"Received 'candles' data: {message[:250]}...") # Log snippet
-        candles = data.get('candles', [])
-        if candles:
-            latest_candle = candles[0] # Deriv returns latest candle first with count:1
-            # Candle format: {epoch, open, high, low, close, volume} (volume is optional)
-            if isinstance(latest_candle, dict):
-                high_24h = latest_candle.get('high')
-                low_24h = latest_candle.get('low')
-                # Deriv 'volume' in candles might be actual trade volume or tick count, depending on instrument.
-                # For synthetic indices it's usually tick count. For Forex, it might be absent or different.
-                # For this dashboard, we'll call it 'volume_24h' generically.
-                volume_24h = latest_candle.get('volume', latest_candle.get('vol')) # Try 'volume' then 'vol'
-
+        if req_id_received and req_id_received.startswith("ohlcv_"):
+            parsed_ohlcv_candles = []
+            if candles_data:
+                for candle in candles_data:
+                    if isinstance(candle, dict):
+                        candle_time_ms = int(candle.get('epoch', 0)) * 1000
+                        parsed_ohlcv_candles.append({
+                            'time': candle_time_ms,
+                            'open': float(candle.get('open', 0)),
+                            'high': float(candle.get('high', 0)),
+                            'low': float(candle.get('low', 0)),
+                            'close': float(candle.get('close', 0)),
+                            'volume': float(candle.get('volume', candle.get('vol', 0)))
+                        })
+                parsed_ohlcv_candles.sort(key=lambda x: x['time'])
                 with market_data_lock:
-                    market_data['high_24h'] = float(high_24h) if high_24h is not None else 'N/A'
-                    market_data['low_24h'] = float(low_24h) if low_24h is not None else 'N/A'
-                    market_data['volume_24h'] = float(volume_24h) if volume_24h is not None else 'N/A'
-                logging.info(f"Updated 24h data: High={market_data['high_24h']}, Low={market_data['low_24h']}, Volume={market_data['volume_24h']}")
+                    market_data['ohlcv_candles'] = parsed_ohlcv_candles
+                logging.info(f"Updated market_data['ohlcv_candles'] with {len(parsed_ohlcv_candles)} candles for main chart.")
             else:
-                logging.warning(f"Received candle data is not in expected dict format: {latest_candle}")
+                logging.warning(f"No candle data in 'ohlcv_' response for req_id: {req_id_received}")
+
+        elif req_id_received and req_id_received.startswith("daily_"):
+            if candles_data:
+                candle = candles_data[0]
+                if isinstance(candle, dict):
+                    with market_data_lock:
+                        market_data['high_24h'] = float(candle.get('high')) if candle.get('high') is not None else 'N/A'
+                        market_data['low_24h'] = float(candle.get('low')) if candle.get('low') is not None else 'N/A'
+                        market_data['volume_24h'] = float(candle.get('volume', candle.get('vol'))) if candle.get('volume', candle.get('vol')) is not None else 'N/A'
+                    logging.info(f"Updated 24h data: High={market_data['high_24h']}, Low={market_data['low_24h']}, Volume={market_data['volume_24h']}")
+                else: logging.warning("Daily candle data item not in dict format.")
+            else: logging.warning(f"No candle data in 'daily_' response for req_id: {req_id_received}")
         else:
-            logging.warning("Received 'candles' message but no candle data found.")
-        # No explicit 'forget' is needed for one-time requests like ticks_history with count=1.
+            logging.warning(f"Received 'candles' message with unrecognized req_id: {req_id_received}. Full message: {message[:300]}")
+
+    elif data.get('error'):
+        logging.error(f"Deriv API Error received: {data['error']}. Full message: {message}")
 
 def on_error_for_deriv(ws, error):
-    """Called when a WebSocket error occurs."""
     logging.error(f"[Deriv WS] Error: {error}")
 
 def on_close_for_deriv(ws, close_status_code, close_msg):
-    """Called when the WebSocket connection is closed."""
     logging.warning(f"WebSocket connection closed. Status: {close_status_code}, Message: {close_msg}. Current SYMBOL: {SYMBOL}")
 
 def start_deriv_ws(token=None):
-    global ws_thread, ws_app, API_TOKEN, market_data
-    if token:
-        API_TOKEN = token
+    global ws_thread, ws_app, API_TOKEN, market_data, current_tick_subscription_id
+    if token: API_TOKEN = token
     
     if ws_app and ws_app.sock and ws_app.sock.connected:
-        logging.info("[Deriv WS] WebSocket is already running. Closing existing connection to restart.")
+        logging.info("Existing WebSocket connection found. Closing it before restarting.")
         try:
             ws_app.keep_running = False
-            ws_app.close() # Ensure close is called
-            if ws_thread and ws_thread.is_alive():
-                 ws_thread.join(timeout=5) # Increased timeout slightly
-        except Exception as e:
-            logging.error(f"[Deriv WS] Error closing existing WebSocket: {e}")
-
-    logging.info(f"[Deriv WS] Starting WebSocket connection to {DERIV_WS_URL} for symbol {SYMBOL}.")
+            ws_app.close()
+            if ws_thread and ws_thread.is_alive(): ws_thread.join(timeout=5)
+        except Exception as e: logging.error(f"Error closing existing WebSocket: {e}")
     
-    # Clear market data on restart
+    logging.info(f"Starting WebSocket connection for SYMBOL: {SYMBOL}.")
     with market_data_lock:
         market_data.clear()
         market_data.update(copy.deepcopy(DEFAULT_MARKET_DATA))
-        logging.info(f"[Deriv WS] Market data cleared and re-initialized for symbol {SYMBOL}.")
+        logging.info(f"Market data cleared and re-initialized for {SYMBOL}.")
 
-    global current_tick_subscription_id
-    current_tick_subscription_id = None # Reset subscription ID for new connection
+    current_tick_subscription_id = None
 
     def run_ws():
         global ws_app
@@ -528,101 +345,73 @@ def start_deriv_ws(token=None):
             DERIV_WS_URL,
             on_open=on_open_for_deriv,
             on_message=on_message_for_deriv,
-            on_error=on_error_for_deriv, # Use new handler
-            on_close=on_close_for_deriv  # Use new handler
+            on_error=on_error_for_deriv,
+            on_close=on_close_for_deriv
         )
-        # Set keep_running to True before starting
         ws_app.keep_running = True
-        ws_app.run_forever(ping_interval=20, ping_timeout=10) # Added ping for keep-alive
-        logging.info("[Deriv WS] WebSocket run_forever loop has exited.")
+        ws_app.run_forever(ping_interval=20, ping_timeout=10)
+        logging.info("WebSocket run_forever loop has exited.")
 
     ws_thread = threading.Thread(target=run_ws, daemon=True)
     ws_thread.start()
-    logging.info("[Deriv WS] WebSocket thread started.")
+    logging.info("WebSocket thread started.")
 
 @app.route('/api/market_data')
-def get_market_data():
+def get_market_data_endpoint(): # Renamed to avoid conflict if any, though Flask handles it
     with market_data_lock:
-        try:
-            # Return a copy to avoid issues if data is modified while serializing
-            data_copy = market_data.copy()
-            return jsonify(data_copy)
-        finally:
-            pass # Lock is released automatically
+        return jsonify(copy.deepcopy(market_data)) # Return a copy
 
-auth_result_queue = queue.Queue()
+@app.route('/api/set_chart_settings', methods=['POST'])
+def set_chart_settings_endpoint():
+    global current_chart_type, current_granularity_seconds, ws_app, SYMBOL, market_data_lock, market_data
 
-def check_deriv_token(token):
-    """Check if the Deriv API token is valid by authorizing via WebSocket."""
-    logging.info(f"[Token Check] Starting token validation for token: {'********' if token else 'No token'}")
-    result = {'success': False, 'error': None}
-    done = threading.Event()
+    data = request.get_json()
+    if not data:
+        return jsonify({'status': 'error', 'message': 'No data provided'}), 400
 
-    def on_open_check(ws_check):
-        logging.debug("[Token Check] WebSocket opened for token check.")
-        ws_check.send(json.dumps({"authorize": token}))
+    new_chart_type = data.get('chart_type', current_chart_type)
+    new_timeframe_str = data.get('timeframe_str', None)
+    made_change = False
 
-    def on_message_check(ws_check, message_text):
-        data = json.loads(message_text)
-        logging.debug(f"[Token Check] Received message: {data}")
-        if data.get('msg_type') == 'authorize':
-            if not data.get('error'):
-                result['success'] = True
-                logging.info("[Token Check] Token validation successful.")
-            else:
-                result['error'] = data['error']['message']
-                logging.error(f"Token validation error: {data['error']}") # Enhanced logging
-            ws_check.close()
-            done.set()
-        elif data.get('error'): # General error not specific to authorize msg_type
-            result['error'] = data['error']['message']
-            logging.error(f"[Token Check] Received error during token check: {result['error']}")
-            ws_check.close()
-            done.set()
+    if new_chart_type != current_chart_type:
+        if new_chart_type in ['tick', 'ohlcv']:
+            current_chart_type = new_chart_type
+            made_change = True
+            logging.info(f"Chart type changed to: {current_chart_type}")
+        else:
+            logging.warning(f"Invalid chart_type received: {new_chart_type}")
 
-    def on_error_check(ws_check, error_text):
-        logging.error(f"[Token Check] WebSocket error during token check: {error_text}")
-        result['error'] = str(error_text) # Ensure error is captured
-        # ws_check.close() # ws_check might be None or in a bad state.
-        done.set() # Ensure we don't hang forever
+    if new_timeframe_str:
+        granularity = TIMEFRAME_TO_SECONDS.get(new_timeframe_str.upper())
+        if granularity:
+            if granularity != current_granularity_seconds:
+                current_granularity_seconds = granularity
+                made_change = True
+                logging.info(f"Chart granularity changed to: {current_granularity_seconds}s (from {new_timeframe_str})")
+        else:
+            logging.warning(f"Invalid timeframe_str received: {new_timeframe_str}")
 
-    def on_close_check(ws_check, status, msg):
-        logging.debug(f"[Token Check] WebSocket closed for token check. Status: {status}, Msg: {msg}")
-        if not done.is_set(): # If not already set by on_message or on_error
-            logging.warning("[Token Check] WebSocket closed before authorization confirmation.")
-            if not result['error'] and not result['success']: # Avoid overwriting specific error
-                 result['error'] = "Connection closed before authorization response."
-            done.set()
+    if made_change and current_chart_type == 'ohlcv':
+        logging.info("Chart settings changed for OHLCV type, requesting new OHLCV data.")
+        if ws_app and ws_app.sock and ws_app.sock.connected:
+            with market_data_lock: # Clear old candles before fetching new ones
+                if 'ohlcv_candles' in market_data: market_data['ohlcv_candles'].clear()
+            request_ohlcv_data(ws_app, SYMBOL, current_granularity_seconds)
+        else:
+            logging.warning("WebSocket not connected. Cannot immediately fetch new OHLCV data on settings change.")
 
+    return jsonify({
+        'status': 'success',
+        'current_chart_type': current_chart_type,
+        'current_granularity_seconds': current_granularity_seconds
+    })
 
-    ws_check_app = websocket.WebSocketApp(
-        DERIV_WS_URL,
-        on_open=on_open_check,
-        on_message=on_message_check,
-        on_error=on_error_check,
-        on_close=on_close_check
-    )
-
-    thread = threading.Thread(target=ws_check_app.run_forever, daemon=True)
-    thread.start()
-
-    if not done.wait(timeout=10): # Wait for up to 10 seconds
-        logging.error("[Token Check] Token validation timed out.")
-        result['error'] = "Token validation timed out."
-        try:
-            ws_check_app.close() # Attempt to close timed-out socket
-        except Exception as e:
-            logging.error(f"[Token Check] Error closing timed-out WebSocket: {e}")
-
-    logging.info(f"[Token Check] Finished token validation. Success: {result['success']}")
-    return result
-
+# ... (rest of the Flask routes and main execution block remain the same) ...
 @app.route('/api/connect', methods=['POST'])
 def connect_deriv_api():
     data = request.get_json()
     token = data.get('token', '')
     logging.info(f"[/api/connect] Connection attempt with token: {'********' if token else 'No token'}")
-    # Check token validity first
     check = check_deriv_token(token)
     if check['success']:
         logging.info(f"[/api/connect] Token validated successfully. Starting Deriv WebSocket for token.")
@@ -639,9 +428,9 @@ def connect_get():
 
 @app.route('/api/set_symbol', methods=['POST'])
 def set_symbol():
-    global SYMBOL, market_data, ws_app, API_TOKEN, current_tick_subscription_id
+    global SYMBOL, market_data, ws_app, API_TOKEN, current_tick_subscription_id, current_granularity_seconds
     data = request.get_json()
-    new_symbol_value = data.get('symbol') # User-friendly symbol, e.g., "USD/JPY"
+    new_symbol_value = data.get('symbol')
 
     if not new_symbol_value or not isinstance(new_symbol_value, str):
         logging.error(f"[/api/set_symbol] Invalid symbol value provided: {new_symbol_value}")
@@ -653,14 +442,9 @@ def set_symbol():
     if actual_deriv_symbol == new_symbol_value and not any(new_symbol_value.startswith(p) for p in ['frx', 'cry', 'R_']):
         logging.warning(f"Symbol '{new_symbol_value}' was not found in DERIV_SYMBOL_MAPPING and might not be a valid Deriv API symbol format.")
 
-    # SYMBOL global should always store the Deriv API format
     logging.info(f"[/api/set_symbol] Attempting to change global SYMBOL from '{SYMBOL}' to '{actual_deriv_symbol.strip()}'")
     SYMBOL = actual_deriv_symbol.strip()
 
-
-    # Reset market_data is now primarily handled by start_deriv_ws.
-    # If ws is not connected, we still need to clear/reset it here for consistency
-    # if the symbol changes but connection isn't immediate.
     if not (ws_app and ws_app.sock and ws_app.sock.connected):
         with market_data_lock:
             logging.info(f"[/api/set_symbol] WebSocket not connected. Clearing market data for new symbol {SYMBOL} locally.")
@@ -668,13 +452,9 @@ def set_symbol():
             market_data.update(copy.deepcopy(DEFAULT_MARKET_DATA))
             logging.info(f"[/api/set_symbol] Market data cleared and re-initialized locally.")
 
-    # Handle WebSocket Re-subscription
     if ws_app and ws_app.sock and ws_app.sock.connected:
-        # No explicit "forget" needed here. start_deriv_ws will close the old connection,
-        # which implicitly ends old subscriptions. The new connection will subscribe to the new SYMBOL.
         logging.info(f"[/api/set_symbol] WebSocket is connected. Restarting connection for new symbol: {SYMBOL}.")
-        logging.info(f"Calling start_deriv_ws to restart WebSocket for new symbol: {SYMBOL}")
-        start_deriv_ws(API_TOKEN) # Pass current token to maintain auth if present
+        start_deriv_ws(API_TOKEN)
     else:
         logging.info(f"[/api/set_symbol] WebSocket not connected. New symbol {SYMBOL} will be used on next connection.")
 
@@ -685,7 +465,69 @@ def home():
     with open('index.html', 'r', encoding='utf-8') as f:
         return f.read()
 
-# Start WebSocket thread on server start (default, no token)
+def check_deriv_token(token): # Moved down to be defined before use if needed by routes above
+    """Check if the Deriv API token is valid by authorizing via WebSocket."""
+    logging.info(f"[Token Check] Starting token validation for token: {'********' if token else 'No token'}")
+    result = {'success': False, 'error': None}
+    done_event = threading.Event() # Renamed to avoid conflict
+
+    def on_open_check(ws_check):
+        logging.debug("[Token Check] WebSocket opened for token check.")
+        ws_check.send(json.dumps({"authorize": token}))
+
+    def on_message_check(ws_check, message_text):
+        data = json.loads(message_text)
+        logging.debug(f"[Token Check] Received message: {data}")
+        if data.get('msg_type') == 'authorize':
+            if not data.get('error'):
+                result['success'] = True
+                logging.info("[Token Check] Token validation successful.")
+            else:
+                result['error'] = data['error']['message']
+                logging.error(f"Token validation error: {data['error']}")
+            ws_check.close()
+            done_event.set()
+        elif data.get('error'):
+            result['error'] = data['error']['message']
+            logging.error(f"[Token Check] Received error during token check: {result['error']}")
+            ws_check.close()
+            done_event.set()
+
+    def on_error_check(ws_check, error_text):
+        logging.error(f"[Token Check] WebSocket error during token check: {error_text}")
+        result['error'] = str(error_text)
+        done_event.set()
+
+    def on_close_check(ws_check, status, msg):
+        logging.debug(f"[Token Check] WebSocket closed for token check. Status: {status}, Msg: {msg}")
+        if not done_event.is_set():
+            logging.warning("[Token Check] WebSocket closed before authorization confirmation.")
+            if not result['error'] and not result['success']:
+                 result['error'] = "Connection closed before authorization response."
+            done_event.set()
+
+    ws_check_app = websocket.WebSocketApp(
+        DERIV_WS_URL,
+        on_open=on_open_check,
+        on_message=on_message_check,
+        on_error=on_error_check,
+        on_close=on_close_check
+    )
+
+    thread = threading.Thread(target=ws_check_app.run_forever, daemon=True)
+    thread.start()
+
+    if not done_event.wait(timeout=10):
+        logging.error("[Token Check] Token validation timed out.")
+        result['error'] = "Token validation timed out."
+        try:
+            ws_check_app.close()
+        except Exception as e:
+            logging.error(f"[Token Check] Error closing timed-out WebSocket: {e}")
+
+    logging.info(f"[Token Check] Finished token validation. Success: {result['success']}")
+    return result
+
 start_deriv_ws()
 
 if __name__ == '__main__':
