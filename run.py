@@ -29,7 +29,16 @@ market_data = {
     'bollinger_upper': [],
     'bollinger_middle': [],
     'bollinger_lower': [],
-    'stochastic': []
+    'stochastic': [],
+    'cci_20': [],
+    'sma_10': [], 'sma_20': [], 'sma_30': [], 'sma_50': [], 'sma_100': [], 'sma_200': [],
+    'ema_10': [], 'ema_20': [], 'ema_30': [], 'ema_50': [], 'ema_100': [], 'ema_200': [],
+    # Signals
+    'rsi_signal': 'N/A',
+    'stochastic_signal': 'N/A',
+    'macd_signal': 'N/A',
+    'cci_20_signal': 'N/A',
+    'price_ema_50_signal': 'N/A',
 }
 
 # Deriv API config
@@ -119,9 +128,8 @@ def calculate_indicators(prices_list: list[float]):
     stochastic_k = stochastic_k.fillna(50) # Fill initial NaNs with 50 (neutral)
     logging.debug(f"[Indicators] Stochastic Oscillator (%K) calculated. Head: {stochastic_k.head().tolist()}, Tail: {stochastic_k.tail().tolist()}")
 
-    # Ensure all returned lists are of the same length as the input prices_series
-    # Pandas rolling/ewm operations with default settings should preserve index and length, filling leading values with NaN.
-    return {
+
+    results = {
         'rsi': rsi_series.tolist(),
         'macd': macd_line_series.tolist(),
         'bollinger_upper': bollinger_upper.tolist(),
@@ -129,6 +137,103 @@ def calculate_indicators(prices_list: list[float]):
         'bollinger_lower': bollinger_lower.tolist(),
         'stochastic': stochastic_k.tolist()
     }
+
+    # SMA Calculations
+    sma_periods = [10, 20, 30, 50, 100, 200]
+    for N in sma_periods:
+        sma_N = prices_series.rolling(window=N).mean().fillna(0) # Using fillna(0) for now
+        results[f'sma_{N}'] = sma_N.tolist()
+    logging.debug(f"calculate_indicators computed SMAs. Last SMA_200 value: {results.get('sma_200', [])[-1:]}")
+
+    # EMA Calculations
+    ema_periods = [10, 20, 30, 50, 100, 200]
+    for N in ema_periods:
+        ema_N = prices_series.ewm(span=N, adjust=False).mean().fillna(0) # Using fillna(0) for now
+        results[f'ema_{N}'] = ema_N.tolist()
+    logging.debug(f"calculate_indicators computed EMAs. Last EMA_200 value: {results.get('ema_200', [])[-1:]}")
+
+    # CCI (Commodity Channel Index) Calculation (20-period)
+    cci_period = 20
+    tp = prices_series # Using close price as Typical Price
+    sma_tp = tp.rolling(window=cci_period).mean()
+    # Calculate Mean Deviation (MD)
+    # For MD, ensure we are calculating the mean of absolute differences from sma_tp over the lookback period.
+    # Pandas rolling apply can be used here, but direct rolling mean of absolute differences is more straightforward if definition aligns.
+    # The common definition is Sum(Abs(TP - SMA_TP)) / N for the MD part of the constant.
+    # Let's use pandas rolling mean on the absolute difference series.
+    mean_dev = (tp - sma_tp).abs().rolling(window=cci_period).mean()
+
+    # Constant 0.015 is standard
+    # Handle division by zero for md: if md is 0, cci is effectively infinite or undefined.
+    # Replace inf with a large number or 0, or NaN. Using 0 for now.
+    cci = (tp - sma_tp) / (0.015 * mean_dev)
+    cci = cci.replace([np.inf, -np.inf], 0).fillna(0) # Replace inf/(-inf) with 0 and then fill NaNs with 0
+
+    results['cci_20'] = cci.tolist()
+    logging.debug(f"calculate_indicators computed CCI_20, length: {len(results['cci_20'])}, last 5: {results['cci_20'][-5:] if len(results['cci_20']) >= 5 else results['cci_20']}")
+
+    # Signal Generation
+    # Ensure there's enough data to get latest values. prices_series is used for latest_price.
+    if not prices_series.empty:
+        latest_price = prices_series.iloc[-1]
+
+        # RSI Signal
+        if results['rsi'] and len(results['rsi']) > 0:
+            latest_rsi = results['rsi'][-1]
+            if latest_rsi < 30: results['rsi_signal'] = 'Buy'
+            elif latest_rsi > 70: results['rsi_signal'] = 'Sell'
+            else: results['rsi_signal'] = 'Neutral'
+        else:
+            results['rsi_signal'] = 'N/A'
+
+        # Stochastic Signal
+        if results['stochastic'] and len(results['stochastic']) > 0:
+            latest_stochastic = results['stochastic'][-1]
+            if latest_stochastic < 20: results['stochastic_signal'] = 'Buy'
+            elif latest_stochastic > 80: results['stochastic_signal'] = 'Sell'
+            else: results['stochastic_signal'] = 'Neutral'
+        else:
+            results['stochastic_signal'] = 'N/A'
+
+        # MACD Signal (MACD line vs. Zero)
+        if results['macd'] and len(results['macd']) > 0:
+            latest_macd = results['macd'][-1]
+            if latest_macd > 0: results['macd_signal'] = 'Buy'
+            elif latest_macd < 0: results['macd_signal'] = 'Sell'
+            else: results['macd_signal'] = 'Neutral'
+        else:
+            results['macd_signal'] = 'N/A'
+
+        # CCI Signal
+        if results['cci_20'] and len(results['cci_20']) > 0:
+            latest_cci = results['cci_20'][-1]
+            if latest_cci < -100: results['cci_signal'] = 'Buy'
+            elif latest_cci > 100: results['cci_signal'] = 'Sell'
+            else: results['cci_signal'] = 'Neutral'
+        else:
+            results['cci_signal'] = 'N/A'
+
+        # Price vs. EMA(50) Signal
+        if results['ema_50'] and len(results['ema_50']) > 0:
+            latest_ema_50 = results['ema_50'][-1]
+            if latest_price > latest_ema_50: results['price_ema_50_signal'] = 'Buy'
+            elif latest_price < latest_ema_50: results['price_ema_50_signal'] = 'Sell'
+            else: results['price_ema_50_signal'] = 'Neutral'
+        else:
+            results['price_ema_50_signal'] = 'N/A'
+    else:
+        # Default signals if no price data
+        results['rsi_signal'] = 'N/A'
+        results['stochastic_signal'] = 'N/A'
+        results['macd_signal'] = 'N/A'
+        results['cci_signal'] = 'N/A'
+        results['price_ema_50_signal'] = 'N/A'
+
+    logging.debug(f"Generated signals: RSI: {results.get('rsi_signal')}, MACD: {results.get('macd_signal')}, Price/EMA50: {results.get('price_ema_50_signal')}")
+
+    # Ensure all returned lists are of the same length as the input prices_series
+    # Pandas rolling/ewm operations with default settings should preserve index and length, filling leading values with NaN (before our fillna(0)).
+    return results
 
 # WebSocket thread to fetch real data from Deriv
 
@@ -237,12 +342,17 @@ def on_message_for_deriv(ws, message):
                     logging.debug(f"After indicator calculation for SYMBOL: {SYMBOL} - calculated RSI length: {len(updated_indicators.get('rsi', []))}, last 5 RSI: {updated_indicators.get('rsi', [])[-5:] if len(updated_indicators.get('rsi', [])) >= 5 else updated_indicators.get('rsi', [])}")
                     logging.debug(f"After indicator calculation for SYMBOL: {SYMBOL} - calculated MACD length: {len(updated_indicators.get('macd', []))}, last 5 MACD: {updated_indicators.get('macd', [])[-5:] if len(updated_indicators.get('macd', [])) >= 5 else updated_indicators.get('macd', [])}")
 
-                    for key_indicator in updated_indicators:
-                        # Ensure calculated indicators list is also sliced if shorter than 100 for some reason
-                        # (though calculate_indicators should return full length)
-                        indicator_values = updated_indicators[key_indicator]
-                        market_data[key_indicator] = indicator_values[-100:]
-                        logging.debug(f"Updating market_data['{key_indicator}'] for SYMBOL: {SYMBOL}. Length: {len(indicator_values)}. Last 5 values assigned: {market_data[key_indicator][-5:] if len(market_data[key_indicator]) >= 5 else market_data[key_indicator]}")
+                    for key, value in updated_indicators.items():
+                        if isinstance(value, list):
+                            # This is an indicator series (e.g., rsi, sma_10)
+                            market_data[key] = value[-100:] # Store last 100 points
+                            logging.debug(f"Updating market_data list '{key}'. Length: {len(market_data[key])}. Last 5: {market_data[key][-5:] if len(market_data[key]) >= 5 else market_data[key]}")
+                        elif isinstance(value, str):
+                            # This is a signal string (e.g., rsi_signal, macd_signal)
+                            market_data[key] = value # Store the single string value
+                            logging.debug(f"Updating market_data signal '{key}' to: {value}")
+                        else:
+                            logging.warning(f"Unexpected data type for key '{key}' in updated_indicators: {type(value)}")
                 except Exception as e_calc:
                     logging.error(f"[Deriv WS] Error calling calculate_indicators: {e_calc}", exc_info=True)
                     # Decide how to handle: skip update for indicators, or clear them, or use last known good
@@ -297,10 +407,19 @@ def start_deriv_ws(token=None):
     
     # Clear market data on restart
     with market_data_lock:
-        market_data = {
-            'timestamps': [], 'prices': [], 'volumes': [], 'rsi': [], 'macd': [],
-            'bollinger_upper': [], 'bollinger_middle': [], 'bollinger_lower': [], 'stochastic': []
+        # Re-initialize the entire market_data structure to its default state
+        market_data.clear() # Clear existing content first
+        default_market_data = {
+            'timestamps': [], 'prices': [], 'volumes': [],
+            'rsi': [], 'macd': [], 'bollinger_upper': [], 'bollinger_middle': [],
+            'bollinger_lower': [], 'stochastic': [], 'cci_20': [],
+            'sma_10': [], 'sma_20': [], 'sma_30': [], 'sma_50': [], 'sma_100': [], 'sma_200': [],
+            'ema_10': [], 'ema_20': [], 'ema_30': [], 'ema_50': [], 'ema_100': [], 'ema_200': [],
+            'rsi_signal': 'N/A', 'stochastic_signal': 'N/A', 'macd_signal': 'N/A',
+            'cci_20_signal': 'N/A', 'price_ema_50_signal': 'N/A',
         }
+        market_data.update(default_market_data)
+        logging.info(f"[Deriv WS] Market data cleared and re-initialized for symbol {SYMBOL}.")
 
     global current_tick_subscription_id
     current_tick_subscription_id = None # Reset subscription ID for new connection
@@ -441,17 +560,24 @@ def set_symbol():
     SYMBOL = actual_deriv_symbol.strip()
 
 
-    # Reset market_data
-    with market_data_lock:
-        logging.info(f"[/api/set_symbol] Clearing market data for new symbol {SYMBOL}.")
-        for key in market_data:
-            market_data[key].clear()
-        # Re-initialize if necessary, or ensure calculate_indicators handles empty lists
-        market_data['timestamps'] = []
-        market_data['prices'] = []
-        market_data['volumes'] = []
-        # Indicators will be repopulated by calculate_indicators
-        logging.info(f"[/api/set_symbol] Market data cleared.")
+    # Reset market_data is now primarily handled by start_deriv_ws.
+    # If ws is not connected, we still need to clear/reset it here for consistency
+    # if the symbol changes but connection isn't immediate.
+    if not (ws_app and ws_app.sock and ws_app.sock.connected):
+        with market_data_lock:
+            logging.info(f"[/api/set_symbol] WebSocket not connected. Clearing market data for new symbol {SYMBOL} locally.")
+            market_data.clear()
+            default_market_data = {
+                'timestamps': [], 'prices': [], 'volumes': [],
+                'rsi': [], 'macd': [], 'bollinger_upper': [], 'bollinger_middle': [],
+                'bollinger_lower': [], 'stochastic': [], 'cci_20': [],
+                'sma_10': [], 'sma_20': [], 'sma_30': [], 'sma_50': [], 'sma_100': [], 'sma_200': [],
+                'ema_10': [], 'ema_20': [], 'ema_30': [], 'ema_50': [], 'ema_100': [], 'ema_200': [],
+                'rsi_signal': 'N/A', 'stochastic_signal': 'N/A', 'macd_signal': 'N/A',
+                'cci_20_signal': 'N/A', 'price_ema_50_signal': 'N/A',
+            }
+            market_data.update(default_market_data)
+            logging.info(f"[/api/set_symbol] Market data cleared and re-initialized locally.")
 
     # Handle WebSocket Re-subscription
     if ws_app and ws_app.sock and ws_app.sock.connected:
