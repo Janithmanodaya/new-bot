@@ -37,6 +37,7 @@ DERIV_APP_ID = 1089
 DERIV_WS_URL = f"wss://ws.binaryws.com/websockets/v3?app_id={DERIV_APP_ID}"
 SYMBOL = 'frxUSDJPY'  # Default symbol, can be parameterized
 API_TOKEN = ''  # Set your token here or via environment
+current_tick_subscription_id = None # Store the ID of the active tick subscription
 
 # Helper: Calculate indicators
 
@@ -131,7 +132,7 @@ def on_open_for_deriv(ws):
 
 def on_message_for_deriv(ws, message):
     """Called when a message is received from the WebSocket."""
-    global market_data, SYMBOL # Added SYMBOL to global for potential update
+    global market_data, SYMBOL, current_tick_subscription_id # Added SYMBOL and subscription ID
     data = json.loads(message)
     msg_type = data.get('msg_type')
 
@@ -153,6 +154,18 @@ def on_message_for_deriv(ws, message):
             #     SYMBOL = current_symbol_in_auth
             logging.info(f"[Deriv WS] Subscribing to ticks for {SYMBOL} after successful authorization.")
             ws.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
+
+    elif msg_type == 'subscribe': # Handle subscription confirmation
+        if data.get('error'):
+            logging.error(f"[Deriv WS] Subscription failed: {data['error']['message']}")
+        else:
+            subscription = data.get('subscription')
+            if subscription and subscription.get('id'):
+                current_tick_subscription_id = subscription['id']
+                logging.info(f"[Deriv WS] Successfully subscribed to ticks. Subscription ID: {current_tick_subscription_id}")
+            else:
+                logging.warning(f"[Deriv WS] Received subscription confirmation, but no ID found: {data}")
+
 
     elif msg_type == 'tick':
         tick = data.get('tick')
@@ -252,7 +265,7 @@ def start_deriv_ws(token=None):
                  ws_thread.join(timeout=5) # Increased timeout slightly
         except Exception as e:
             logging.error(f"[Deriv WS] Error closing existing WebSocket: {e}")
-    
+
     logging.info(f"[Deriv WS] Starting WebSocket connection to {DERIV_WS_URL} for symbol {SYMBOL}.")
     
     # Clear market data on restart
@@ -261,6 +274,9 @@ def start_deriv_ws(token=None):
             'timestamps': [], 'prices': [], 'volumes': [], 'rsi': [], 'macd': [],
             'bollinger_upper': [], 'bollinger_middle': [], 'bollinger_lower': [], 'stochastic': []
         }
+
+    global current_tick_subscription_id
+    current_tick_subscription_id = None # Reset subscription ID for new connection
 
     def run_ws():
         global ws_app
@@ -376,6 +392,51 @@ def connect_deriv_api():
 @app.route('/api/connect', methods=['GET'])
 def connect_get():
     return jsonify({'status': 'ok', 'message': 'Use POST to connect with your token.'})
+
+@app.route('/api/set_symbol', methods=['POST'])
+def set_symbol():
+    global SYMBOL, market_data, ws_app, API_TOKEN, current_tick_subscription_id
+    data = request.get_json()
+    new_symbol = data.get('symbol')
+
+    if not new_symbol or not isinstance(new_symbol, str):
+        logging.error(f"[/api/set_symbol] Invalid symbol provided: {new_symbol}")
+        return jsonify({'status': 'error', 'message': 'Invalid symbol format'}), 400
+
+    logging.info(f"[/api/set_symbol] Received request to change symbol from {SYMBOL} to {new_symbol}")
+    SYMBOL = new_symbol
+
+    # Reset market_data
+    with market_data_lock:
+        logging.info(f"[/api/set_symbol] Clearing market data for new symbol {SYMBOL}.")
+        for key in market_data:
+            market_data[key].clear()
+        # Re-initialize if necessary, or ensure calculate_indicators handles empty lists
+        market_data['timestamps'] = []
+        market_data['prices'] = []
+        market_data['volumes'] = []
+        # Indicators will be repopulated by calculate_indicators
+        logging.info(f"[/api/set_symbol] Market data cleared.")
+
+    # Handle WebSocket Re-subscription
+    if ws_app and ws_app.sock and ws_app.sock.connected:
+        logging.info(f"[/api/set_symbol] WebSocket is connected. Attempting to re-subscribe for {SYMBOL}.")
+        if current_tick_subscription_id:
+            logging.info(f"[/api/set_symbol] Unsubscribing from old ticks (ID: {current_tick_subscription_id}).")
+            try:
+                ws_app.send(json.dumps({"forget": current_tick_subscription_id}))
+            except Exception as e:
+                logging.error(f"[/api/set_symbol] Error sending forget request: {e}")
+            current_tick_subscription_id = None # Reset whether forget succeeded or not
+
+        # Restart WebSocket to subscribe to the new symbol
+        # start_deriv_ws will close the existing connection and open a new one using the new SYMBOL
+        logging.info(f"[/api/set_symbol] Restarting WebSocket connection for new symbol {SYMBOL}.")
+        start_deriv_ws(API_TOKEN) # Pass current token to maintain auth if present
+    else:
+        logging.info(f"[/api/set_symbol] WebSocket not connected. New symbol {SYMBOL} will be used on next connection.")
+
+    return jsonify({'status': 'symbol_updated', 'new_symbol': SYMBOL})
 
 @app.route('/')
 def home():

@@ -609,6 +609,8 @@
     </div>
 
     <script>
+        let currentSelectedSymbol = ''; // Global variable for the currently selected symbol
+
         // Fetch data from Flask API and update charts
         async function fetchMarketData() {
             try {
@@ -630,7 +632,7 @@
             }
         }
 
-        function updateCharts(data) {
+        function updateCharts(data, symbol) { // Added symbol parameter
             if (!data || typeof data !== 'object') {
                 console.error('UpdateCharts: Invalid or missing data object');
                 // Optionally display a message on charts: e.g., by clearing them or showing "No data"
@@ -662,7 +664,7 @@
                     data: {
                         labels: data.timestamps,
                         datasets: [{
-                            label: 'USD/JPY',
+                        label: symbol || 'Price', // Use passed symbol or default
                             data: data.prices,
                             borderColor: '#3b82f6',
                             backgroundColor: 'rgba(59, 130, 246, 0.1)',
@@ -835,6 +837,13 @@
                  connectBtn.parentNode.appendChild(connectionStatus);
             }
 
+            const currencySelector = document.getElementById('currencySelector');
+            const chartTitleElement = document.querySelector('.chart-title');
+            // Assuming there's an element for the symbol in market overview, e.g., with id="marketOverviewSymbol"
+            // Let's target the div that contains "USD/JPY • Forex" text.
+            // This is fragile; a more specific ID or class would be better.
+            const marketOverviewSymbolElement = document.querySelector('.market-overview div:nth-child(3)');
+
 
             function setStatus(text, color) {
                 connectionStatus.textContent = text;
@@ -843,12 +852,73 @@
 
             // Initial state
             setStatus("Disconnected", "var(--gray)");
+            currentSelectedSymbol = currencySelector.value; // Initialize global symbol
+            if (chartTitleElement) {
+                chartTitleElement.textContent = `Market Price - ${currentSelectedSymbol}`;
+            }
+            if(marketOverviewSymbolElement) { // Update market overview symbol display
+                marketOverviewSymbolElement.textContent = `${currentSelectedSymbol} • Forex`; // Assuming all are Forex for now
+            }
+
             // const connectBtn = document.getElementById('connectBtn'); // Already defined above
             if (connectBtn) {
                 connectBtn.innerHTML = '<i class="fas fa-plug"></i> Connect to API';
                 connectBtn.style.background = 'var(--primary)';
                 connectBtn.disabled = false; // Ensure button is enabled initially
             }
+
+            // Event listener for currency selector change
+            currencySelector.addEventListener('change', async function(event) {
+                const newSymbolValue = event.target.value;
+                console.log(`Symbol changed to: ${newSymbolValue}`);
+                currentSelectedSymbol = newSymbolValue; // Update global symbol
+
+                setStatus(`Switching to ${newSymbolValue}...`, 'var(--warning)');
+                currencySelector.disabled = true;
+
+                // Optionally clear charts or show loading state on them
+                // For example, clear price display immediately
+                document.querySelector('.price-display').textContent = '--';
+                // updateCharts({timestamps:[], prices:[], rsi:[], macd:[], bollinger_upper:[], bollinger_middle:[], bollinger_lower:[], stochastic:[], volumes:[]}, newSymbolValue);
+
+
+                try {
+                    const response = await fetch('/api/set_symbol', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ symbol: newSymbolValue })
+                    });
+                    const result = await response.json();
+
+                    if (response.ok && result.status === 'symbol_updated') {
+                        if (chartTitleElement) {
+                            chartTitleElement.textContent = `Market Price - ${result.new_symbol}`;
+                        }
+                        if (marketOverviewSymbolElement) { // Update market overview symbol display
+                             marketOverviewSymbolElement.textContent = `${result.new_symbol} • Forex`;
+                        }
+                        setStatus(`Switched to ${result.new_symbol}`, 'var(--success)');
+                        // Data will be updated by the poller. Optionally trigger an immediate poll:
+                        // clearTimeout(pollTimeoutId); pollMarketData();
+                    } else {
+                        const errorMsg = result.message || 'Failed to switch symbol.';
+                        console.error('Error switching symbol:', errorMsg);
+                        setStatus(`Error: ${errorMsg}`, 'var(--danger)');
+                        // Revert selector if needed, or alert user
+                        currencySelector.value = currentSelectedSymbol; // Revert to last known good symbol if API call fails
+                        currentSelectedSymbol = currencySelector.value; // Ensure global is also reverted
+                        alert(`Failed to switch symbol: ${errorMsg}`);
+                    }
+                } catch (error) {
+                    console.error('Exception when calling /api/set_symbol:', error);
+                    setStatus('Symbol switch failed (Network)', 'var(--danger)');
+                    currencySelector.value = currentSelectedSymbol; // Revert
+                    currentSelectedSymbol = currencySelector.value;
+                    alert('Error switching symbol. Check network or backend.');
+                } finally {
+                    currencySelector.disabled = false;
+                }
+            });
 
 
             // Poll the Python backend for real market data every 2 seconds
@@ -859,7 +929,7 @@
                 try {
                     const data = await fetchMarketData(); // This now re-throws errors
                     if (data && data.prices && data.prices.length > 0) {
-                       updateCharts(data);
+                       updateCharts(data, currentSelectedSymbol); // Pass currentSelectedSymbol
                        document.querySelector('.price-display').textContent = data.prices[data.prices.length-1].toFixed(2);
                        // If data is successfully fetched and charts updated, imply connection is fine for data.
                        // Status might be "Connected" from connect API, or if it was "Data Error", can clear it.
