@@ -72,52 +72,39 @@ def calculate_indicators(prices_list: list[float]):
     logging.debug(f"calculate_indicators received prices_list length: {len(prices_list)}, last 5: {prices_list[-5:] if len(prices_list) >= 5 else prices_list}")
     if not prices_list:
         logging.warning("[Indicators] Price list is empty. Cannot calculate indicators.")
-        # Return a structure that includes all expected keys, even if empty or default
-        return copy.deepcopy({k: ([] if isinstance(DEFAULT_MARKET_DATA[k], list) else 'N/A') for k in DEFAULT_MARKET_DATA if k not in ['timestamps', 'prices', 'volumes', 'ohlcv_candles']})
+        empty_results = {}
+        for k, v_default in DEFAULT_MARKET_DATA.items():
+            if k not in ['timestamps', 'prices', 'volumes', 'ohlcv_candles', 'high_24h', 'low_24h', 'volume_24h']:
+                if isinstance(v_default, list): empty_results[k] = []
+                elif isinstance(v_default, str): empty_results[k] = 'N/A'
+        return empty_results
 
     prices_series = pd.Series(prices_list, dtype=float)
-    results = {} # Initialize results dict for this calculation run
+    results = {}
 
-    # RSI
-    delta = prices_series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    rs[loss == 0] = np.inf
-    rs[(gain == 0) & (loss == 0)] = np.nan
-    rsi = 100 - (100 / (1 + rs))
-    results['rsi'] = rsi.fillna(50).tolist()
+    results['rsi'] = prices_series.rolling(14).apply(lambda x: (100 - (100 / (1 + (x.diff().clip(lower=0).sum() / abs(x.diff().clip(upper=0).sum() or 1))))), raw=True).fillna(50).tolist()
     logging.debug(f"calculate_indicators computed RSI, length: {len(results['rsi'])}, last 5: {results['rsi'][-5:] if len(results['rsi']) >= 5 else results['rsi']}")
 
-    # MACD
     macd_line_series = prices_series.ewm(span=12, adjust=False).mean() - prices_series.ewm(span=26, adjust=False).mean()
     results['macd'] = macd_line_series.fillna(0).tolist()
     logging.debug(f"calculate_indicators computed MACD, length: {len(results['macd'])}, last 5: {results['macd'][-5:] if len(results['macd']) >= 5 else results['macd']}")
 
-    # Bollinger Bands
     bollinger_middle = prices_series.rolling(window=20).mean()
     bollinger_std = prices_series.rolling(window=20).std(ddof=0)
     results['bollinger_upper'] = (bollinger_middle + (2 * bollinger_std)).fillna(prices_series).tolist()
     results['bollinger_middle'] = bollinger_middle.fillna(prices_series).tolist()
     results['bollinger_lower'] = (bollinger_middle - (2 * bollinger_std)).fillna(prices_series).tolist()
 
-    # Stochastic Oscillator (%K)
-    low_14 = prices_series.rolling(window=14).min()
-    high_14 = prices_series.rolling(window=14).max()
+    low_14 = prices_series.rolling(14).min()
+    high_14 = prices_series.rolling(14).max()
     stochastic_k = 100 * (prices_series - low_14) / (high_14 - low_14 + 1e-9)
     results['stochastic'] = stochastic_k.fillna(50).tolist()
 
-    # SMA Calculations
-    sma_periods = [10, 20, 30, 50, 100, 200]
-    for N in sma_periods:
+    for N in [10, 20, 30, 50, 100, 200]:
         results[f'sma_{N}'] = prices_series.rolling(window=N).mean().fillna(0).tolist()
-
-    # EMA Calculations
-    ema_periods = [10, 20, 30, 50, 100, 200]
-    for N in ema_periods:
+    for N in [10, 20, 30, 50, 100, 200]:
         results[f'ema_{N}'] = prices_series.ewm(span=N, adjust=False).mean().fillna(0).tolist()
 
-    # CCI (Commodity Channel Index)
     cci_period = 20
     tp = prices_series
     sma_tp = tp.rolling(window=cci_period).mean()
@@ -125,59 +112,53 @@ def calculate_indicators(prices_list: list[float]):
     cci = (tp - sma_tp) / (0.015 * mean_dev)
     results['cci_20'] = cci.replace([np.inf, -np.inf], 0).fillna(0).tolist()
 
-    # Signal Generation & Prediction States
-    if not prices_series.empty:
+    if not prices_series.empty and len(prices_list) > 0:
         latest_price = prices_series.iloc[-1]
-
         latest_rsi = results['rsi'][-1] if results['rsi'] else 50
         results['rsi_signal'] = 'Buy' if latest_rsi < 30 else ('Sell' if latest_rsi > 70 else 'Neutral')
         results['rsi_prediction_state'] = 'Oversold' if latest_rsi < 30 else ('Overbought' if latest_rsi > 70 else 'Neutral')
-
         latest_stochastic = results['stochastic'][-1] if results['stochastic'] else 50
         results['stochastic_signal'] = 'Buy' if latest_stochastic < 20 else ('Sell' if latest_stochastic > 80 else 'Neutral')
         results['stochastic_prediction_state'] = 'Oversold' if latest_stochastic < 20 else ('Overbought' if latest_stochastic > 80 else 'Neutral')
-
         latest_macd = results['macd'][-1] if results['macd'] else 0
         results['macd_signal'] = 'Buy' if latest_macd > 0 else ('Sell' if latest_macd < 0 else 'Neutral')
         results['macd_prediction_state'] = 'Bullish' if latest_macd > 0 else ('Bearish' if latest_macd < 0 else 'Neutral')
-
         latest_cci = results['cci_20'][-1] if results['cci_20'] else 0
         results['cci_signal'] = 'Buy' if latest_cci < -100 else ('Sell' if latest_cci > 100 else 'Neutral')
         results['cci_20_prediction_state'] = 'Oversold' if latest_cci < -100 else ('Overbought' if latest_cci > 100 else 'Neutral')
-
-        latest_ema_50 = results['ema_50'][-1] if results['ema_50'] else latest_price
+        latest_ema_50 = results['ema_50'][-1] if (results.get('ema_50') and len(results['ema_50']) > 0) else latest_price
         results['price_ema_50_signal'] = 'Buy' if latest_price > latest_ema_50 else ('Sell' if latest_price < latest_ema_50 else 'Neutral')
     else:
         for sig_key in ['rsi_signal', 'stochastic_signal', 'macd_signal', 'cci_signal', 'price_ema_50_signal',
-                        'rsi_prediction_state', 'stochastic_prediction_state', 'macd_prediction_state', 'cci_20_prediction_state']:
+                        'rsi_prediction_state', 'stochastic_prediction_state', 'macd_prediction_state', 'cci_20_prediction_state',
+                        'market_sentiment_text']:
             results[sig_key] = 'N/A'
 
-    # Market Sentiment Logic
     signal_keys = ['rsi_signal', 'stochastic_signal', 'macd_signal', 'cci_20_signal', 'price_ema_50_signal']
     active_signals = [results.get(key) for key in signal_keys if results.get(key) and results.get(key) not in ['N/A', 'Neutral']]
     buy_count = active_signals.count('Buy')
     sell_count = active_signals.count('Sell')
     results['market_sentiment_text'] = 'Bullish' if buy_count > sell_count else ('Bearish' if sell_count > buy_count else 'Neutral')
-
     logging.debug(f"Prediction States: RSI: {results.get('rsi_prediction_state')}, Stochastic: {results.get('stochastic_prediction_state')}, MACD: {results.get('macd_prediction_state')}, CCI: {results.get('cci_20_prediction_state')}")
     return results
 
-# WebSocket interaction
 ws_thread = None
 ws_app = None
 
 def request_ohlcv_data(ws_app_instance, symbol_to_fetch, granularity_s, candle_count=100):
     if ws_app_instance and ws_app_instance.sock and ws_app_instance.sock.connected:
         req_id_ohlcv = f"ohlcv_{symbol_to_fetch}_{granularity_s}_{int(time.time())}"
-        logging.info(f"Requesting OHLCV data (req_id: {req_id_ohlcv}): {symbol_to_fetch}, Granularity: {granularity_s}s, Count: {candle_count}")
-        ws_app_instance.send(json.dumps({
+        request_payload = {
             "ticks_history": symbol_to_fetch,
             "style": "candles",
             "granularity": int(granularity_s),
             "end": "latest",
             "count": int(candle_count),
+            "adjust_start_time": 1, # Ensure candles align to typical market open times
             "req_id": req_id_ohlcv
-        }))
+        }
+        logging.debug(f"Sending ticks_history request for OHLCV (req_id: {req_id_ohlcv}): {json.dumps(request_payload)}")
+        ws_app_instance.send(json.dumps(request_payload))
         return req_id_ohlcv
     else:
         logging.warning(f"WebSocket not connected. Cannot request OHLCV data for {symbol_to_fetch}.")
@@ -242,64 +223,57 @@ def on_message_for_deriv(ws, message):
             return
 
         ts = datetime.fromtimestamp(tick['epoch'], timezone.utc)
-        logging.info(f"Processing tick: Symbol={tick.get('symbol')}, Price={tick['quote']}, Time={ts.isoformat()}")
+        # logging.info(f"Processing tick: Symbol={tick.get('symbol')}, Price={tick['quote']}, Time={ts.isoformat()}") # Too verbose for DEBUG
 
         with market_data_lock:
-            if current_chart_type == 'tick': # Only update tick data if chart type is 'tick'
+            if current_chart_type == 'tick':
                 market_data['timestamps'].append(ts.isoformat())
                 market_data['prices'].append(tick['quote'])
-                for k_list in ['timestamps', 'prices']: # Keep only last 100 for tick data
+                for k_list in ['timestamps', 'prices']:
                     if len(market_data[k_list]) > 100: market_data[k_list] = market_data[k_list][-100:]
 
-            # Determine price source for indicators based on chart type
             prices_for_indicators = []
             if current_chart_type == 'ohlcv':
                 if market_data.get('ohlcv_candles') and len(market_data['ohlcv_candles']) > 0:
                     prices_for_indicators = [c['close'] for c in market_data['ohlcv_candles']]
                     logging.debug(f"Using OHLCV close prices for indicators. Count: {len(prices_for_indicators)}. Last 5: {prices_for_indicators[-5:] if prices_for_indicators else []}")
                 else:
-                    # Fallback for OHLCV if candles are empty: use recent ticks (last 50, or fewer if not available)
-                    prices_for_indicators = market_data['prices'][-(min(50, len(market_data['prices']))):]
+                    current_tick_prices = market_data['prices']
+                    prices_for_indicators = current_tick_prices[-(min(50, len(current_tick_prices))):]
                     logging.debug(f"OHLCV chart active but no ohlcv_candles. Falling back to recent {len(prices_for_indicators)} ticks for indicators.")
-            else: # 'tick' chart type
-                # For tick chart, use recent ticks for indicators (last 50, or fewer if not available)
-                prices_for_indicators = market_data['prices'][-(min(50, len(market_data['prices']))):]
+            else:
+                current_tick_prices = market_data['prices']
+                prices_for_indicators = current_tick_prices[-(min(50, len(current_tick_prices))):]
                 logging.debug(f"Tick chart active. Using recent {len(prices_for_indicators)} ticks for indicators. Last 5: {prices_for_indicators[-5:] if prices_for_indicators else []}")
 
-            updated_data = {} # Initialize to ensure it's defined
+            updated_data = {}
             if not prices_for_indicators:
                 logging.warning("No price data available for indicator calculation. Skipping.")
             else:
                 updated_data = calculate_indicators(prices_for_indicators)
 
-            # Update market_data with the new indicators and signals
             for key, value in updated_data.items():
-                if key in market_data: # Ensure key exists in market_data (it should, due to DEFAULT_MARKET_DATA)
+                if key in market_data:
                     if isinstance(value, list):
-                        # For indicator series, we store the full list (calculate_indicators already handles length if needed)
-                        # The main market_data[key] will be sliced to 100 points if it's 'prices' or 'timestamps' (done above)
-                        # For other indicator series, calculate_indicators returns full length based on input.
-                        # We are not re-slicing to 100 here for indicators like SMA, EMA etc. as calculate_indicators provides full series.
                         market_data[key] = value
-                        logging.debug(f"Updating market_data list '{key}'. New Length: {len(market_data[key])}. Last 5: {market_data[key][-5:] if len(market_data[key]) >= 5 else market_data[key]}")
                     elif isinstance(value, str):
-                        market_data[key] = value # Store the single string value (signals, states)
-                        logging.debug(f"Updating market_data string value '{key}' to: {value}")
+                        market_data[key] = value
 
-            # Volume update (simulated, as ticks don't usually carry volume)
-            # This should be independent of the indicator price source decision
             if 'volumes' in market_data:
                  market_data['volumes'].append(np.random.randint(1000,5000))
                  if len(market_data['volumes']) > 100: market_data['volumes'] = market_data['volumes'][-100:]
+            # logging.info("[Deriv WS] Market data (including indicators) updated successfully based on new tick.") # Can be too verbose
 
     elif msg_type == 'candles':
-        logging.info(f"Received 'candles' data (req_id: {req_id_received}): {message[:300]}...")
-        candles_data = data.get('candles', [])
+        # echo_req and req_id_received are already available from the top of the function
+        logging.debug(f"Full raw 'candles' response for req_id {req_id_received}: {message}")
+        raw_candles_list = data.get('candles', [])
+        logging.debug(f"Received {len(raw_candles_list)} raw candle objects for req_id {req_id_received}.")
         
         if req_id_received and req_id_received.startswith("ohlcv_"):
             parsed_ohlcv_candles = []
-            if candles_data:
-                for candle in candles_data:
+            if raw_candles_list: # Check if raw_candles_list is not empty
+                for candle in raw_candles_list:
                     if isinstance(candle, dict):
                         candle_time_ms = int(candle.get('epoch', 0)) * 1000
                         parsed_ohlcv_candles.append({
@@ -311,15 +285,27 @@ def on_message_for_deriv(ws, message):
                             'volume': float(candle.get('volume', candle.get('vol', 0)))
                         })
                 parsed_ohlcv_candles.sort(key=lambda x: x['time'])
+                logging.debug(f"Parsed {len(parsed_ohlcv_candles)} candles for OHLCV req_id {req_id_received}. First 1-2 parsed: {parsed_ohlcv_candles[:2] if parsed_ohlcv_candles else []}")
                 with market_data_lock:
                     market_data['ohlcv_candles'] = parsed_ohlcv_candles
-                logging.info(f"Updated market_data['ohlcv_candles'] with {len(parsed_ohlcv_candles)} candles for main chart.")
+                logging.info(f"Updated market_data['ohlcv_candles'] with {len(parsed_ohlcv_candles)} candles for main chart (req_id: {req_id_received}).")
+                if current_chart_type == 'ohlcv':
+                    logging.info("OHLCV data received, recalculating indicators using these candles.")
+                    prices_for_recalc = [c['close'] for c in parsed_ohlcv_candles]
+                    if prices_for_recalc:
+                        updated_data_from_ohlcv = calculate_indicators(prices_for_recalc)
+                        with market_data_lock:
+                            for key, value in updated_data_from_ohlcv.items():
+                                if key in market_data:
+                                    if isinstance(value, list): market_data[key] = value
+                                    elif isinstance(value, str): market_data[key] = value
+                        logging.info("Indicators recalculated and updated using new OHLCV data.")
             else:
                 logging.warning(f"No candle data in 'ohlcv_' response for req_id: {req_id_received}")
 
         elif req_id_received and req_id_received.startswith("daily_"):
-            if candles_data:
-                candle = candles_data[0]
+            if raw_candles_list: # Check if raw_candles_list is not empty
+                candle = raw_candles_list[0]
                 if isinstance(candle, dict):
                     with market_data_lock:
                         market_data['high_24h'] = float(candle.get('high')) if candle.get('high') is not None else 'N/A'
@@ -379,16 +365,15 @@ def start_deriv_ws(token=None):
 
 @app.route('/api/market_data')
 def get_market_data_endpoint():
-    global current_chart_type, current_granularity_seconds, TIMEFRAME_TO_SECONDS # Ensure globals are accessible
+    global current_chart_type, current_granularity_seconds, TIMEFRAME_TO_SECONDS
 
     with market_data_lock:
         data_to_send = copy.deepcopy(market_data)
 
-    # Add current chart settings to the response
     data_to_send['current_chart_type'] = current_chart_type
     data_to_send['current_granularity_seconds'] = current_granularity_seconds
 
-    current_timeframe_str = 'N/A' # Default
+    current_timeframe_str = 'N/A'
     for tf_str, tf_secs in TIMEFRAME_TO_SECONDS.items():
         if tf_secs == current_granularity_seconds:
             current_timeframe_str = tf_str
@@ -428,14 +413,20 @@ def set_chart_settings_endpoint():
         else:
             logging.warning(f"Invalid timeframe_str received: {new_timeframe_str}")
 
-    if made_change and current_chart_type == 'ohlcv':
-        logging.info("Chart settings changed for OHLCV type, requesting new OHLCV data.")
+    if made_change:
+        logging.info(f"Chart settings changed. ChartType: {current_chart_type}, Granularity: {current_granularity_seconds}s. Requesting relevant data if needed.")
         if ws_app and ws_app.sock and ws_app.sock.connected:
-            with market_data_lock: # Clear old candles before fetching new ones
-                if 'ohlcv_candles' in market_data: market_data['ohlcv_candles'].clear()
-            request_ohlcv_data(ws_app, SYMBOL, current_granularity_seconds)
+            if current_chart_type == 'ohlcv':
+                logging.info(f"Attempting to fetch/refresh OHLCV data due to settings change: Symbol={SYMBOL}, Granularity={current_granularity_seconds}s, ChartType={current_chart_type}")
+                with market_data_lock:
+                    if 'ohlcv_candles' in market_data: market_data['ohlcv_candles'].clear()
+                    if 'prices' in market_data: market_data['prices'].clear()
+                    if 'timestamps' in market_data: market_data['timestamps'].clear()
+                request_ohlcv_data(ws_app, SYMBOL, current_granularity_seconds)
+            # If chart type changed to 'tick', existing live ticks will populate 'prices' and 'timestamps'.
+            # Indicators will be recalculated on the next tick based on the new 'current_chart_type'.
         else:
-            logging.warning("WebSocket not connected. Cannot immediately fetch new OHLCV data on settings change.")
+            logging.warning("WebSocket not connected. Cannot immediately fetch new data on settings change.")
 
     return jsonify({
         'status': 'success',
@@ -443,7 +434,6 @@ def set_chart_settings_endpoint():
         'current_granularity_seconds': current_granularity_seconds
     })
 
-# ... (rest of the Flask routes and main execution block remain the same) ...
 @app.route('/api/connect', methods=['POST'])
 def connect_deriv_api():
     data = request.get_json()
@@ -502,11 +492,10 @@ def home():
     with open('index.html', 'r', encoding='utf-8') as f:
         return f.read()
 
-def check_deriv_token(token): # Moved down to be defined before use if needed by routes above
-    """Check if the Deriv API token is valid by authorizing via WebSocket."""
+def check_deriv_token(token):
     logging.info(f"[Token Check] Starting token validation for token: {'********' if token else 'No token'}")
     result = {'success': False, 'error': None}
-    done_event = threading.Event() # Renamed to avoid conflict
+    done_event = threading.Event()
 
     def on_open_check(ws_check):
         logging.debug("[Token Check] WebSocket opened for token check.")

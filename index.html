@@ -220,6 +220,63 @@
         .trend-down {
             color: var(--danger);
         }
+
+        /* Styles for Market Sentiment value */
+        .sentiment-value-bullish {
+            background-color: rgba(34, 197, 94, 0.2); /* --success with alpha */
+            color: var(--success);
+            padding: 4px 10px;
+            border-radius: 6px;
+            display: inline-block; /* To allow padding and border-radius */
+            font-weight: 600;
+        }
+        .sentiment-value-bearish {
+            background-color: rgba(239, 68, 68, 0.2); /* --danger with alpha */
+            color: var(--danger);
+            padding: 4px 10px;
+            border-radius: 6px;
+            display: inline-block;
+            font-weight: 600;
+        }
+        .sentiment-value-neutral {
+            background-color: rgba(148, 163, 184, 0.2); /* --gray with alpha */
+            color: var(--gray);
+            padding: 4px 10px;
+            border-radius: 6px;
+            display: inline-block;
+            font-weight: 600;
+        }
+
+        /* Styles for Prediction States */
+        .prediction-state-text { /* Common styling for all prediction states */
+            padding: 3px 8px;
+            border-radius: 5px;
+            font-size: 0.9em;
+            font-weight: 500;
+            text-align: center;
+            min-width: 80px; /* Ensure consistent width */
+            display: inline-block;
+        }
+        .prediction-state-oversold { /* Bullish connotation */
+            background-color: rgba(34, 197, 94, 0.15);
+            color: var(--success);
+        }
+        .prediction-state-overbought { /* Bearish connotation */
+            background-color: rgba(239, 68, 68, 0.15);
+            color: var(--danger);
+        }
+        .prediction-state-bullish {
+            background-color: rgba(34, 197, 94, 0.15);
+            color: var(--success);
+        }
+        .prediction-state-bearish {
+            background-color: rgba(239, 68, 68, 0.15);
+            color: var(--danger);
+        }
+        .prediction-state-neutral {
+            background-color: rgba(148, 163, 184, 0.15);
+            color: var(--gray);
+        }
         
         .indicator-chart {
             height: 100px;
@@ -317,8 +374,23 @@
         .prediction-item {
             display: flex;
             justify-content: space-between;
+            align-items: center; /* Vertically align items in the center */
             padding: 12px 0;
             border-bottom: 1px solid var(--border);
+        }
+        .prediction-item > div:first-child { /* Label RSI, MACD etc. */
+            flex-basis: 35%; /* Give it more space */
+            text-align: left;
+            font-weight: 500;
+        }
+        .prediction-item > div:nth-child(2) { /* State Text e.g. Oversold */
+            flex-basis: 30%;
+            text-align: center; /* The .prediction-state-text already centers its content */
+        }
+        .prediction-item > div:nth-child(3) { /* Strength Dots Container */
+            flex-basis: 25%;
+            display: flex; /* To use justify-content */
+            justify-content: flex-end; /* Align dots to the right */
         }
         
         .prediction-item:last-child {
@@ -893,29 +965,32 @@
                             const items = document.querySelectorAll('.prediction-card .prediction-item');
                             items.forEach(item => {
                                 const labelEl = item.querySelector('div:first-child');
-                                if (labelEl && labelEl.textContent.includes(indicatorName)) { // Use includes for flexibility e.g. "RSI (14)"
+                                if (labelEl && labelEl.textContent.includes(indicatorName)) {
                                     const stateEl = item.querySelector('div:nth-child(2)');
                                     if (stateEl) {
-                                        stateEl.textContent = state;
-                                        stateEl.className = ''; // Clear existing trend classes
-                                        if (trendClass) {
+                                        stateEl.textContent = state; // Set the text
+                                        stateEl.className = ''; // Clear existing classes
+                                        stateEl.classList.add('prediction-state-text'); // Add common class
+                                        if (trendClass) { // trendClass will now be like 'prediction-state-bullish'
                                             stateEl.classList.add(trendClass);
+                                        } else {
+                                            stateEl.classList.add('prediction-state-neutral'); // Default if no specific class
                                         }
                                     }
-                                    // Note: Prediction strength dots are not updated by this function.
                                 }
                             });
                         }
 
-                        // Function to map backend prediction states to frontend display and classes
+                        // Function to map backend prediction states to frontend display and CSS classes
                         function getPredictionDisplay(state) {
-                            let displayClass = '';
-                            if (state === 'Oversold' || state === 'Bullish' || state === 'Buy') { // Consider "Buy" from general signal too
-                                displayClass = 'trend-up'; // Green
-                            } else if (state === 'Overbought' || state === 'Bearish' || state === 'Sell') { // Consider "Sell"
-                                displayClass = 'trend-down'; // Red
-                            }
-                            return { text: state, className: displayClass };
+                            let cssClass = 'prediction-state-neutral'; // Default
+                            if (state === 'Oversold') cssClass = 'prediction-state-oversold';
+                            else if (state === 'Overbought') cssClass = 'prediction-state-overbought';
+                            else if (state === 'Bullish') cssClass = 'prediction-state-bullish';
+                            else if (state === 'Bearish') cssClass = 'prediction-state-bearish';
+                            else if (state === 'Neutral') cssClass = 'prediction-state-neutral';
+                            // 'Buy' and 'Sell' signals are typically for the table, prediction states are more descriptive.
+                            return { text: state, className: cssClass };
                         }
 
                         // Update Indicator Predictions Card
@@ -933,17 +1008,16 @@
                         }
                         if (data.cci_20_prediction_state !== undefined) {
                             const cciDisplay = getPredictionDisplay(data.cci_20_prediction_state);
-                            // Re-purpose "Bollinger Bands" item for CCI prediction
                             const items = document.querySelectorAll('.prediction-card .prediction-item');
                             items.forEach(item => {
                                 const labelEl = item.querySelector('div:first-child');
-                                if (labelEl && labelEl.textContent.startsWith('Bollinger Bands')) {
-                                    labelEl.textContent = 'CCI (20)'; // Change label
-                                    updatePredictionItem('CCI (20)', cciDisplay.text, cciDisplay.className); // Update with new label
+                                if (labelEl && labelEl.textContent.startsWith('Bollinger Bands')) { // Still using this to find the CCI row
+                                    labelEl.textContent = 'CCI (20)';
+                                    updatePredictionItem('CCI (20)', cciDisplay.text, cciDisplay.className);
                                 }
                             });
                         }
-                        // Note: The 'Volume' prediction item remains static as no prediction state for it is generated.
+                        // Note: The 'Volume' prediction item remains static.
 
                         // Update Market Overview Card
                         const high24hEl = document.querySelector('.market-overview .stats-grid .stat-card:nth-child(1) .stat-value');
@@ -968,11 +1042,14 @@
                         const sentimentEl = document.querySelector('.market-overview .stats-grid .stat-card:nth-child(4) .stat-value');
                         if (sentimentEl && data.market_sentiment_text !== undefined) {
                             sentimentEl.textContent = data.market_sentiment_text;
-                            sentimentEl.classList.remove('trend-up', 'trend-down');
+                            // Clear existing sentiment classes
+                            sentimentEl.classList.remove('sentiment-value-bullish', 'sentiment-value-bearish', 'sentiment-value-neutral', 'trend-up', 'trend-down');
                             if (data.market_sentiment_text === 'Bullish') {
-                                sentimentEl.classList.add('trend-up');
+                                sentimentEl.classList.add('sentiment-value-bullish');
                             } else if (data.market_sentiment_text === 'Bearish') {
-                                sentimentEl.classList.add('trend-down');
+                                sentimentEl.classList.add('sentiment-value-bearish');
+                            } else { // Neutral or N/A
+                                sentimentEl.classList.add('sentiment-value-neutral');
                             }
                         }
 
@@ -1022,12 +1099,40 @@
             const chartTypeSelectEl = document.getElementById('chartTypeSelect');
             const timeframeButtons = document.querySelectorAll('.timeframe-selector .time-btn');
 
+            function setTimeframeButtonsState(disabled) {
+                timeframeButtons.forEach(btn => {
+                    btn.disabled = disabled;
+                    if (disabled) {
+                        btn.style.opacity = '0.5'; // Visually indicate disabled state
+                        btn.style.cursor = 'not-allowed';
+                    } else {
+                        btn.style.opacity = '1';
+                        btn.style.cursor = 'pointer';
+                    }
+                });
+            }
+
             if (chartTypeSelectEl) {
                 chartTypeSelectEl.value = 'tick'; // Default to 'tick'
+                // Initial state based on default chart type
+                if (chartTypeSelectEl.value === 'tick') {
+                    setTimeframeButtonsState(true);
+                } else {
+                    setTimeframeButtonsState(false);
+                }
+
                 chartTypeSelectEl.addEventListener('change', function(event) {
                     const newChartType = event.target.value;
                     const activeTimeframeButton = document.querySelector('.timeframe-selector .time-btn.active');
                     const currentTimeframe = activeTimeframeButton ? activeTimeframeButton.dataset.timeframe : '1H'; // Default if somehow none active
+
+                    if (newChartType === 'tick') {
+                        setTimeframeButtonsState(true);
+                        // Optionally, if switching to tick, we might not want to send a timeframe_str or a default one.
+                        // For now, it sends the last active or default '1H'. Backend should handle this gracefully for 'tick' type.
+                    } else { // 'ohlcv'
+                        setTimeframeButtonsState(false);
+                    }
 
                     console.log(`Chart type changed to: ${newChartType}, current timeframe: ${currentTimeframe}`);
                     setStatus(`Loading ${newChartType === 'ohlcv' ? 'Candlestick' : 'Line'} chart...`, 'var(--warning)');
@@ -1062,9 +1167,11 @@
                         }
                         const newTimeframe = this.dataset.timeframe;
 
-                        const chartTypeSelectEl = document.getElementById('chartTypeSelect'); // Get reference
-                        if (chartTypeSelectEl) { // Ensure it exists
+                        // When a timeframe button is clicked, it implies OHLCV chart.
+                        const chartTypeSelectEl = document.getElementById('chartTypeSelect');
+                        if (chartTypeSelectEl) {
                            chartTypeSelectEl.value = 'ohlcv'; // Force dropdown to 'ohlcv'
+                           setTimeframeButtonsState(false); // Ensure buttons are enabled
                         }
 
                         const chartTypeForAPI = 'ohlcv'; // Explicitly use 'ohlcv' for the API call
@@ -1095,6 +1202,13 @@
                         });
                     });
                 });
+            }
+
+            // Initial check for timeframe buttons based on the default chart type
+            if (chartTypeSelectEl && chartTypeSelectEl.value === 'tick') {
+                setTimeframeButtonsState(true);
+            } else {
+                setTimeframeButtonsState(false);
             }
 
             pollMarketData(); // Start polling
