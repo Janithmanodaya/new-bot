@@ -251,24 +251,45 @@ def on_message_for_deriv(ws, message):
                 for k_list in ['timestamps', 'prices']: # Keep only last 100 for tick data
                     if len(market_data[k_list]) > 100: market_data[k_list] = market_data[k_list][-100:]
 
-            # Indicators are calculated based on tick prices, regardless of chart type for now
-            # This might change if OHLCV data is to be the source for indicators
-            prices_for_indicators = market_data['prices'] # Use the running list of tick prices
-            if not prices_for_indicators and market_data['ohlcv_candles']: # Fallback if no tick prices but have ohlcv
-                 prices_for_indicators = [c['close'] for c in market_data['ohlcv_candles']]
+            # Determine price source for indicators based on chart type
+            prices_for_indicators = []
+            if current_chart_type == 'ohlcv':
+                if market_data.get('ohlcv_candles') and len(market_data['ohlcv_candles']) > 0:
+                    prices_for_indicators = [c['close'] for c in market_data['ohlcv_candles']]
+                    logging.debug(f"Using OHLCV close prices for indicators. Count: {len(prices_for_indicators)}. Last 5: {prices_for_indicators[-5:] if prices_for_indicators else []}")
+                else:
+                    # Fallback for OHLCV if candles are empty: use recent ticks (last 50, or fewer if not available)
+                    prices_for_indicators = market_data['prices'][-(min(50, len(market_data['prices']))):]
+                    logging.debug(f"OHLCV chart active but no ohlcv_candles. Falling back to recent {len(prices_for_indicators)} ticks for indicators.")
+            else: # 'tick' chart type
+                # For tick chart, use recent ticks for indicators (last 50, or fewer if not available)
+                prices_for_indicators = market_data['prices'][-(min(50, len(market_data['prices']))):]
+                logging.debug(f"Tick chart active. Using recent {len(prices_for_indicators)} ticks for indicators. Last 5: {prices_for_indicators[-5:] if prices_for_indicators else []}")
 
-
-            if prices_for_indicators:
+            updated_data = {} # Initialize to ensure it's defined
+            if not prices_for_indicators:
+                logging.warning("No price data available for indicator calculation. Skipping.")
+            else:
                 updated_data = calculate_indicators(prices_for_indicators)
-                for key, value in updated_data.items():
-                    if key in market_data: # Ensure key exists in market_data
-                        if isinstance(value, list):
-                            market_data[key] = value[-100:]
-                        elif isinstance(value, str):
-                            market_data[key] = value
-            # Volume update can be independent if needed
-            if 'volumes' in market_data: # Check if 'volumes' key exists
-                 market_data['volumes'].append(np.random.randint(1000,5000)) # Simulated volume
+
+            # Update market_data with the new indicators and signals
+            for key, value in updated_data.items():
+                if key in market_data: # Ensure key exists in market_data (it should, due to DEFAULT_MARKET_DATA)
+                    if isinstance(value, list):
+                        # For indicator series, we store the full list (calculate_indicators already handles length if needed)
+                        # The main market_data[key] will be sliced to 100 points if it's 'prices' or 'timestamps' (done above)
+                        # For other indicator series, calculate_indicators returns full length based on input.
+                        # We are not re-slicing to 100 here for indicators like SMA, EMA etc. as calculate_indicators provides full series.
+                        market_data[key] = value
+                        logging.debug(f"Updating market_data list '{key}'. New Length: {len(market_data[key])}. Last 5: {market_data[key][-5:] if len(market_data[key]) >= 5 else market_data[key]}")
+                    elif isinstance(value, str):
+                        market_data[key] = value # Store the single string value (signals, states)
+                        logging.debug(f"Updating market_data string value '{key}' to: {value}")
+
+            # Volume update (simulated, as ticks don't usually carry volume)
+            # This should be independent of the indicator price source decision
+            if 'volumes' in market_data:
+                 market_data['volumes'].append(np.random.randint(1000,5000))
                  if len(market_data['volumes']) > 100: market_data['volumes'] = market_data['volumes'][-100:]
 
     elif msg_type == 'candles':
@@ -357,9 +378,25 @@ def start_deriv_ws(token=None):
     logging.info("WebSocket thread started.")
 
 @app.route('/api/market_data')
-def get_market_data_endpoint(): # Renamed to avoid conflict if any, though Flask handles it
+def get_market_data_endpoint():
+    global current_chart_type, current_granularity_seconds, TIMEFRAME_TO_SECONDS # Ensure globals are accessible
+
     with market_data_lock:
-        return jsonify(copy.deepcopy(market_data)) # Return a copy
+        data_to_send = copy.deepcopy(market_data)
+
+    # Add current chart settings to the response
+    data_to_send['current_chart_type'] = current_chart_type
+    data_to_send['current_granularity_seconds'] = current_granularity_seconds
+
+    current_timeframe_str = 'N/A' # Default
+    for tf_str, tf_secs in TIMEFRAME_TO_SECONDS.items():
+        if tf_secs == current_granularity_seconds:
+            current_timeframe_str = tf_str
+            break
+    data_to_send['current_timeframe_string'] = current_timeframe_str
+
+    logging.debug(f"Sending market_data with chart_type: {current_chart_type}, granularity: {current_granularity_seconds}s, timeframe_str: {current_timeframe_str}")
+    return jsonify(data_to_send)
 
 @app.route('/api/set_chart_settings', methods=['POST'])
 def set_chart_settings_endpoint():

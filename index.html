@@ -1061,10 +1061,16 @@
                             return;
                         }
                         const newTimeframe = this.dataset.timeframe;
-                        const currentChartType = chartTypeSelectEl ? chartTypeSelectEl.value : 'tick';
 
-                        console.log(`Timeframe changed to: ${newTimeframe}, current chart type: ${currentChartType}`);
-                        setStatus(`Loading ${newTimeframe} data...`, 'var(--warning)');
+                        const chartTypeSelectEl = document.getElementById('chartTypeSelect'); // Get reference
+                        if (chartTypeSelectEl) { // Ensure it exists
+                           chartTypeSelectEl.value = 'ohlcv'; // Force dropdown to 'ohlcv'
+                        }
+
+                        const chartTypeForAPI = 'ohlcv'; // Explicitly use 'ohlcv' for the API call
+
+                        console.log(`Timeframe changed to: ${newTimeframe}, forcing chart type to: ${chartTypeForAPI}`);
+                        setStatus(`Loading ${newTimeframe} OHLCV data...`, 'var(--warning)');
 
                         timeframeButtons.forEach(btn => btn.classList.remove('active'));
                         this.classList.add('active');
@@ -1072,7 +1078,7 @@
                         fetch('/api/set_chart_settings', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ chart_type: currentChartType, timeframe_str: newTimeframe })
+                            body: JSON.stringify({ chart_type: chartTypeForAPI, timeframe_str: newTimeframe })
                         })
                         .then(response => response.json())
                         .then(data => {
