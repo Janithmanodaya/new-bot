@@ -7,6 +7,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/moment@2.29.1/moment.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-moment"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial@0.2.1/dist/chartjs-chart-financial.min.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         :root {
@@ -219,6 +220,63 @@
         .trend-down {
             color: var(--danger);
         }
+
+        /* Styles for Market Sentiment value */
+        .sentiment-value-bullish {
+            background-color: rgba(34, 197, 94, 0.2); /* --success with alpha */
+            color: var(--success);
+            padding: 4px 10px;
+            border-radius: 6px;
+            display: inline-block; /* To allow padding and border-radius */
+            font-weight: 600;
+        }
+        .sentiment-value-bearish {
+            background-color: rgba(239, 68, 68, 0.2); /* --danger with alpha */
+            color: var(--danger);
+            padding: 4px 10px;
+            border-radius: 6px;
+            display: inline-block;
+            font-weight: 600;
+        }
+        .sentiment-value-neutral {
+            background-color: rgba(148, 163, 184, 0.2); /* --gray with alpha */
+            color: var(--gray);
+            padding: 4px 10px;
+            border-radius: 6px;
+            display: inline-block;
+            font-weight: 600;
+        }
+
+        /* Styles for Prediction States */
+        .prediction-state-text { /* Common styling for all prediction states */
+            padding: 3px 8px;
+            border-radius: 5px;
+            font-size: 0.9em;
+            font-weight: 500;
+            text-align: center;
+            min-width: 80px; /* Ensure consistent width */
+            display: inline-block;
+        }
+        .prediction-state-oversold { /* Bullish connotation */
+            background-color: rgba(34, 197, 94, 0.15);
+            color: var(--success);
+        }
+        .prediction-state-overbought { /* Bearish connotation */
+            background-color: rgba(239, 68, 68, 0.15);
+            color: var(--danger);
+        }
+        .prediction-state-bullish {
+            background-color: rgba(34, 197, 94, 0.15);
+            color: var(--success);
+        }
+        .prediction-state-bearish {
+            background-color: rgba(239, 68, 68, 0.15);
+            color: var(--danger);
+        }
+        .prediction-state-neutral {
+            background-color: rgba(148, 163, 184, 0.15);
+            color: var(--gray);
+        }
         
         .indicator-chart {
             height: 100px;
@@ -316,8 +374,23 @@
         .prediction-item {
             display: flex;
             justify-content: space-between;
+            align-items: center; /* Vertically align items in the center */
             padding: 12px 0;
             border-bottom: 1px solid var(--border);
+        }
+        .prediction-item > div:first-child { /* Label RSI, MACD etc. */
+            flex-basis: 35%; /* Give it more space */
+            text-align: left;
+            font-weight: 500;
+        }
+        .prediction-item > div:nth-child(2) { /* State Text e.g. Oversold */
+            flex-basis: 30%; 
+            text-align: center; /* The .prediction-state-text already centers its content */
+        }
+        .prediction-item > div:nth-child(3) { /* Strength Dots Container */
+            flex-basis: 25%;
+            display: flex; /* To use justify-content */
+            justify-content: flex-end; /* Align dots to the right */
         }
         
         .prediction-item:last-child {
@@ -400,6 +473,8 @@
                     <option value="USD/CAD">USD/CAD</option>
                     <option value="BTC/USD">BTC/USD</option>
                     <option value="ETH/USD">ETH/USD</option>
+                    <option value="Gold/USD">Gold/USD</option> <!-- New -->
+                    <option value="Volatility 75 Index">Volatility 75 Index</option> <!-- New -->
                 </select>
                 <button class="btn" id="connectBtn">
                     <i class="fas fa-plug"></i> Connect to API
@@ -413,94 +488,45 @@
         <div class="dashboard">
             <div class="main-content">
                 <div class="chart-container">
-                    <div class="chart-header">
+                    <div class="chart-header" style="display: flex; justify-content: space-between; align-items: center;">
                         <div class="chart-title">Market Price - USD/JPY</div>
-                        <div class="timeframe-selector">
-                            <button class="time-btn active">1H</button>
-                            <button class="time-btn">4H</button>
-                            <button class="time-btn">1D</button>
-                            <button class="time-btn">1W</button>
-                            <button class="time-btn">1M</button>
+                        <div style="display: flex; align-items: center;"> <!-- Wrapper for selectors -->
+                            <div class="timeframe-selector">
+                                <button class="time-btn active" data-timeframe="1H">1H</button>
+                                <button class="time-btn" data-timeframe="4H">4H</button>
+                                <button class="time-btn" data-timeframe="1D">1D</button>
+                                <button class="time-btn" data-timeframe="1W">1W</button>
+                                <button class="time-btn" data-timeframe="1M">1M</button>
+                            </div>
+                            <div class="chart-type-selector" style="margin-left: 20px;">
+                                <label for="chartTypeSelect" style="font-size: 14px; color: var(--gray); margin-right: 5px;">Type:</label>
+                                <select id="chartTypeSelect" style="background: var(--dark); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; color: var(--light); font-size: 14px;">
+                                    <option value="tick">Line</option>
+                                    <option value="ohlcv">Candles</option>
+                                </select>
+                            </div>
                         </div>
                     </div>
                     <canvas id="priceChart"></canvas>
                 </div>
-                
-                <div class="indicators-grid">
-                    <div class="indicator-card">
-                        <div class="indicator-header">
-                            <div class="indicator-title">
-                                <div class="indicator-icon">
-                                    <i class="fas fa-wave-square"></i>
-                                </div>
-                                <span>RSI (14)</span>
-                            </div>
-                            <div class="indicator-value trend-down">42.36</div>
-                        </div>
-                        <div class="indicator-chart">
-                            <canvas id="rsiChart"></canvas>
-                        </div>
-                    </div>
-                    
-                    <div class="indicator-card">
-                        <div class="indicator-header">
-                            <div class="indicator-title">
-                                <div class="indicator-icon">
-                                    <i class="fas fa-compress-alt"></i>
-                                </div>
-                                <span>MACD (12,26,9)</span>
-                            </div>
-                            <div class="indicator-value trend-up">1.25</div>
-                        </div>
-                        <div class="indicator-chart">
-                            <canvas id="macdChart"></canvas>
-                        </div>
-                    </div>
-                    
-                    <div class="indicator-card">
-                        <div class="indicator-header">
-                            <div class="indicator-title">
-                                <div class="indicator-icon">
-                                    <i class="fas fa-chart-area"></i>
-                                </div>
-                                <span>Bollinger Bands (20,2)</span>
-                            </div>
-                            <div class="indicator-value">147.82</div>
-                        </div>
-                        <div class="indicator-chart">
-                            <canvas id="bollingerChart"></canvas>
-                        </div>
-                    </div>
-                    
-                    <div class="indicator-card">
-                        <div class="indicator-header">
-                            <div class="indicator-title">
-                                <div class="indicator-icon">
-                                    <i class="fas fa-bolt"></i>
-                                </div>
-                                <span>Stochastic (14,3,3)</span>
-                            </div>
-                            <div class="indicator-value trend-up">68.74</div>
-                        </div>
-                        <div class="indicator-chart">
-                            <canvas id="stochasticChart"></canvas>
-                        </div>
-                    </div>
-                    
-                    <div class="indicator-card">
-                        <div class="indicator-header">
-                            <div class="indicator-title">
-                                <div class="indicator-icon">
-                                    <i class="fas fa-weight-hanging"></i>
-                                </div>
-                                <span>Volume</span>
-                            </div>
-                            <div class="indicator-value">1.24M</div>
-                        </div>
-                        <div class="indicator-chart">
-                            <canvas id="volumeChart"></canvas>
-                        </div>
-                    </div>
+                <p id="symbolNote" style="font-size:12px; color:var(--gray); margin-top: 10px; text-align: center; display:none;">
+                    Note: For Gold/USD, OHLCV data might be unavailable if 'XAUUSD' is not the correct Deriv API symbol for your account, or if candle data is not provided for it. Please verify the symbol if issues persist.
+                </p>
+
+                <div class="analysis-table-container" style="background: var(--card-bg); border-radius: 12px; border: 1px solid var(--border); padding: 20px; margin-top: 20px;">
+                    <h2 style="margin-bottom: 15px; font-size: 18px; font-weight: 600;">Analysis Data</h2>
+                    <table id="analysisTable" style="width: 100%; border-collapse: collapse;">
+                        <thead>
+                            <tr>
+                                <th style="text-align: left; padding: 8px; border-bottom: 1px solid var(--border);">Indicator</th>
+                                <th style="text-align: right; padding: 8px; border-bottom: 1px solid var(--border);">Value</th>
+                                <th style="text-align: left; padding: 8px; border-bottom: 1px solid var(--border);">Signal</th>
+                            </tr>
+                        </thead>
+                        <tbody id="analysisTableBody">
+                            <!-- Rows will be dynamically inserted here by JavaScript -->
+                        </tbody>
+                    </table>
                 </div>
             </div>
             
@@ -609,197 +635,703 @@
     </div>
 
     <script>
-        // Fetch data from Flask API and update charts
-        async function fetchMarketData() {
-            const response = await fetch('http://127.0.0.1:5000/api/market_data');
-            return await response.json();
+        let currentSelectedSymbol = ''; // Global variable for the currently selected symbol
+        let jsFrontendChartType = 'tick'; // Default chart type
+
+        const analysisTableConfig = [
+            { key: 'prices', label: 'Price', precision: 2 }, // 'key' here refers to the data field for the value
+            { key: 'rsi', label: 'RSI (14)', precision: 2, signalKey: 'rsi_signal' },
+            { key: 'stochastic', label: 'Stochastic (14,3,3)', precision: 2, signalKey: 'stochastic_signal' },
+            { key: 'macd', label: 'MACD (12,26,9)', precision: 2, signalKey: 'macd_signal' }, // This is the MACD line
+            { key: 'cci_20', label: 'CCI (20)', precision: 2, signalKey: 'cci_20_signal' },
+            { key: 'bollinger_upper', label: 'Bollinger Upper', precision: 2 },
+            { key: 'bollinger_middle', label: 'Bollinger Middle', precision: 2 },
+            { key: 'bollinger_lower', label: 'Bollinger Lower', precision: 2 },
+            { key: 'sma_10', label: 'SMA (10)', precision: 2 },
+            { key: 'ema_10', label: 'EMA (10)', precision: 2 },
+            { key: 'sma_20', label: 'SMA (20)', precision: 2 },
+            { key: 'ema_20', label: 'EMA (20)', precision: 2 },
+            { key: 'sma_30', label: 'SMA (30)', precision: 2 },
+            { key: 'ema_30', label: 'EMA (30)', precision: 2 },
+            { key: 'sma_50', label: 'SMA (50)', precision: 2 },
+            { key: 'ema_50', label: 'EMA (50)', precision: 2, signalKey: 'price_ema_50_signal' }, // EMA50 will show its own value, and the Price/EMA50 cross signal
+            { key: 'sma_100', label: 'SMA (100)', precision: 2 },
+            { key: 'ema_100', label: 'EMA (100)', precision: 2 },
+            { key: 'sma_200', label: 'SMA (200)', precision: 2 },
+            { key: 'ema_200', label: 'EMA (200)', precision: 2 },
+            { key: 'volumes', label: 'Volume', precision: 0 } // Assuming 'volumes' is the key
+        ];
+        
+        function updateAnalysisTable(apiData) {
+            const tableBody = document.getElementById('analysisTableBody');
+            if (!tableBody) {
+                console.error("analysisTableBody not found!");
+                return;
+            }
+            tableBody.innerHTML = ''; // Clear existing rows
+
+            analysisTableConfig.forEach(item => {
+                const dataArray = apiData[item.key]; // Value array
+                const latestValue = dataArray && dataArray.length > 0 ? dataArray[dataArray.length - 1] : 'N/A';
+                const displayValue = typeof latestValue === 'number' ? latestValue.toFixed(item.precision) : latestValue;
+
+                const row = tableBody.insertRow();
+                const cellLabel = row.insertCell();
+                const cellValue = row.insertCell();
+                const cellSignal = row.insertCell(); // New cell for signal
+
+                cellLabel.textContent = item.label;
+                cellValue.textContent = displayValue;
+                cellSignal.textContent = '-'; // Default signal display
+
+                // Styling for label and value cells
+                cellLabel.style.padding = '8px';
+                cellLabel.style.borderBottom = '1px solid var(--border)';
+                cellValue.style.padding = '8px';
+                cellValue.style.borderBottom = '1px solid var(--border)';
+                cellValue.style.textAlign = 'right';
+                
+                // Styling for signal cell
+                cellSignal.style.padding = '8px';
+                cellSignal.style.borderBottom = '1px solid var(--border)';
+                cellSignal.style.textAlign = 'left'; // Or 'center' as preferred
+
+                if (item.signalKey && apiData[item.signalKey] !== undefined) { // Check undefined to allow "Neutral" or other strings
+                    const signalValue = apiData[item.signalKey];
+                    cellSignal.textContent = signalValue; // Display the signal string ('Buy', 'Sell', 'Neutral', 'N/A')
+                    
+                    // Apply color styling based on signalValue
+                    if (signalValue === 'Buy') {
+                        cellSignal.style.color = 'var(--success)'; // Green
+                    } else if (signalValue === 'Sell') {
+                        cellSignal.style.color = 'var(--danger)';  // Red
+                    } else { // Neutral, N/A, or any other string
+                        cellSignal.style.color = 'var(--gray)'; 
+                    }
+                } else {
+                     cellSignal.style.color = 'var(--gray)'; // Default for '-' or if signalKey is not present
+                }
+            });
         }
 
-        function updateCharts(data) {
-            // Update all charts with real data from API
-            // Price Chart
+        // Fetch data from Flask API and update charts
+        async function fetchMarketData() {
+            try {
+                const response = await fetch('http://127.0.0.1:5000/api/market_data');
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    console.error('Data fetch error:', response.status, errorText);
+                    setStatus('Data Fetch Error', 'var(--danger)'); // Assuming setStatus is globally available or passed
+                    throw new Error(`Failed to fetch market data: ${response.status} ${errorText}`);
+                }
+                return await response.json();
+            } catch (e) {
+                console.error('FetchMarketData caught exception:', e.message);
+                // Ensure setStatus is called even for network errors caught by try-catch
+                if (typeof setStatus === 'function') { // Check if setStatus is defined
+                    setStatus('Data Fetch Error', 'var(--danger)');
+                }
+                throw e; // Re-throw so pollMarketData can catch it
+            }
+        }
+
+        function updateCharts(apiData, currentSymbol) {
+            console.log("--- updateCharts Called ---");
+            // Use try-catch for stringify in case apiData is not perfectly structured or contains circular refs, though unlikely for this data
+            try {
+                console.log("Received apiData (structure snapshot):", JSON.parse(JSON.stringify(apiData))); 
+            } catch (e) {
+                console.log("Received apiData (could not stringify, logging directly):", apiData);
+            }
+            console.log("Received currentSymbol:", currentSymbol);
+            console.log("Data check: apiData.current_chart_type:", apiData.current_chart_type);
+            console.log("Data check: apiData.current_granularity_seconds:", apiData.current_granularity_seconds);
+            console.log("Data check: apiData.ohlcv_candles type:", typeof apiData.ohlcv_candles, "is Array:", Array.isArray(apiData.ohlcv_candles));
+            if (apiData.ohlcv_candles) {
+                console.log("Data check: apiData.ohlcv_candles length:", apiData.ohlcv_candles.length);
+                if (apiData.ohlcv_candles.length > 0) {
+                    try { // Added try-catch for individual candle stringify
+                        console.log("Data check: First OHLCV candle received by frontend:", JSON.parse(JSON.stringify(apiData.ohlcv_candles[0])));
+                        console.log("Data check: Last OHLCV candle received by frontend:", JSON.parse(JSON.stringify(apiData.ohlcv_candles[apiData.ohlcv_candles.length - 1])));
+                    } catch(e) {
+                        console.error("Error stringifying individual OHLCV candles:", e);
+                        console.log("First OHLCV candle (direct):", apiData.ohlcv_candles[0]);
+                        console.log("Last OHLCV candle (direct):", apiData.ohlcv_candles[apiData.ohlcv_candles.length - 1]);
+                    }
+                }
+            } else {
+                console.log("Data check: apiData.ohlcv_candles is undefined or null.");
+            }
+            console.log("Data check: apiData.prices type:", typeof apiData.prices, "is Array:", Array.isArray(apiData.prices));
+             if (apiData.prices) {
+                console.log("Data check: apiData.prices length:", apiData.prices.length);
+            } else {
+                console.log("Data check: apiData.prices is undefined or null.");
+            }
+
+            const chartTypeToRender = jsFrontendChartType;
+            // Still log what backend thinks for comparison:
+            console.log(`updateCharts: Backend reports current_chart_type: ${apiData.current_chart_type}, Frontend will use jsFrontendChartType: ${chartTypeToRender}`);
+            
+            // const chartType = apiData.current_chart_type; // Old way
+            const granularitySeconds = apiData.current_granularity_seconds; // Still use backend's granularity for time unit calc
+
             const priceCtx = document.getElementById('priceChart').getContext('2d');
-            if (window.priceChartInstance) window.priceChartInstance.destroy();
-            window.priceChartInstance = new Chart(priceCtx, {
-                type: 'line',
-                data: {
-                    labels: data.timestamps,
-                    datasets: [{
-                        label: 'USD/JPY',
-                        data: data.prices,
-                        borderColor: '#3b82f6',
-                        backgroundColor: 'rgba(59, 130, 246, 0.1)',
-                        borderWidth: 2,
-                        fill: true,
-                        tension: 0.3,
-                        pointRadius: 0
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: {
-                        x: { type: 'time', time: { unit: 'minute' }, grid: { display: false } },
-                        y: { grid: { color: 'rgba(255, 255, 255, 0.05)' } }
+
+            if (window.priceChartInstance) {
+                window.priceChartInstance.destroy();
+            }
+
+            if (chartTypeToRender === 'ohlcv' && apiData.ohlcv_candles && apiData.ohlcv_candles.length > 0) {
+                const ohlcData = apiData.ohlcv_candles.map(candle => ({
+                    x: candle.time, 
+                    o: candle.open,
+                    h: candle.high,
+                    l: candle.low,
+                    c: candle.close
+                }));
+                console.log("Prepared ohlcData for candlestick chart:", ohlcData);
+                if (ohlcData.length > 0) { console.log("First transformed ohlcData point:", ohlcData[0]); console.log("Last transformed ohlcData point:", ohlcData[ohlcData.length-1]); }
+                
+                let timeUnit = 'minute'; 
+                if (granularitySeconds >= 86400) timeUnit = 'day';
+                else if (granularitySeconds >= 3600) timeUnit = 'hour';
+
+                console.log("Attempting to create new Candlestick chart with time unit:", timeUnit);
+                window.priceChartInstance = new Chart(priceCtx, {
+                    type: 'candlestick', 
+                    data: {
+                        datasets: [{
+                            label: `${currentSymbol} OHLCV`,
+                            data: ohlcData,
+                            color: { // Example styling for candlestick colors
+                                up: 'rgba(34, 197, 94, 1)', // --success
+                                down: 'rgba(239, 68, 68, 1)', // --danger
+                                unchanged: 'rgba(148, 163, 184, 1)' // --gray
+                            }
+                        }]
                     },
-                    plugins: { legend: { display: false } }
-                }
-            });
-
-            // RSI Chart
-            const rsiCtx = document.getElementById('rsiChart').getContext('2d');
-            if (window.rsiChartInstance) window.rsiChartInstance.destroy();
-            window.rsiChartInstance = new Chart(rsiCtx, {
-                type: 'line',
-                data: {
-                    labels: data.timestamps,
-                    datasets: [{
-                        data: data.rsi,
-                        borderColor: '#22c55e',
-                        borderWidth: 2,
-                        tension: 0.3,
-                        pointRadius: 0
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: {
-                        x: { display: false },
-                        y: { display: true, min: 0, max: 100, grid: { display: false }, ticks: { display: false } }
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            x: {
+                                type: 'time',
+                                time: { unit: timeUnit }, 
+                                adapters: { date: { locale: moment.locale() } }, 
+                                grid: { display: false }
+                            },
+                            y: {
+                                grid: { color: 'rgba(255, 255, 255, 0.05)' },
+                            }
+                        },
+                        plugins: {
+                            legend: { display: true, labels: { color: 'var(--light)'} },
+                            tooltip: { mode: 'index', intersect: false }
+                        }
+                    }
+                });
+            } else if (chartTypeToRender === 'tick' && apiData.timestamps && apiData.prices && apiData.timestamps.length > 0) {
+                console.log("Attempting to create new Line (Tick) chart.");
+                window.priceChartInstance = new Chart(priceCtx, {
+                    type: 'line',
+                    data: {
+                        labels: apiData.timestamps, 
+                        datasets: [{
+                            label: `${currentSymbol} Price (Tick)`,
+                            data: apiData.prices,
+                            borderColor: '#3b82f6',
+                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                            borderWidth: 2,
+                            fill: true,
+                            tension: 0.3,
+                            pointRadius: 0
+                        }]
                     },
-                    plugins: { legend: { display: false } }
-                }
-            });
-
-            // MACD Chart
-            const macdCtx = document.getElementById('macdChart').getContext('2d');
-            if (window.macdChartInstance) window.macdChartInstance.destroy();
-            window.macdChartInstance = new Chart(macdCtx, {
-                type: 'bar',
-                data: {
-                    labels: data.timestamps,
-                    datasets: [{
-                        data: data.macd,
-                        backgroundColor: data.macd.map(val => val >= 0 ? 'rgba(34, 197, 94, 0.7)' : 'rgba(239, 68, 68, 0.7)'),
-                        borderWidth: 0
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: { x: { display: false }, y: { display: false } },
-                    plugins: { legend: { display: false } }
-                }
-            });
-
-            // Bollinger Bands Chart
-            const bollingerCtx = document.getElementById('bollingerChart').getContext('2d');
-            if (window.bollingerChartInstance) window.bollingerChartInstance.destroy();
-            window.bollingerChartInstance = new Chart(bollingerCtx, {
-                type: 'line',
-                data: {
-                    labels: data.timestamps,
-                    datasets: [
-                        { data: data.bollinger_upper, borderColor: 'rgba(239, 68, 68, 0.7)', borderWidth: 1, pointRadius: 0 },
-                        { data: data.bollinger_middle, borderColor: '#94a3b8', borderWidth: 1, pointRadius: 0 },
-                        { data: data.bollinger_lower, borderColor: 'rgba(34, 197, 94, 0.7)', borderWidth: 1, pointRadius: 0 }
-                    ]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: { x: { display: false }, y: { display: false } },
-                    plugins: { legend: { display: false } }
-                }
-            });
-
-            // Volume Chart
-            const volumeCtx = document.getElementById('volumeChart').getContext('2d');
-            if (window.volumeChartInstance) window.volumeChartInstance.destroy();
-            window.volumeChartInstance = new Chart(volumeCtx, {
-                type: 'bar',
-                data: {
-                    labels: data.timestamps,
-                    datasets: [{
-                        data: data.volumes,
-                        backgroundColor: 'rgba(59, 130, 246, 0.7)',
-                        borderWidth: 0
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: { x: { display: false }, y: { display: false } },
-                    plugins: { legend: { display: false } }
-                }
-            });
-
-            // Stochastic Chart
-            const stochasticCtx = document.getElementById('stochasticChart').getContext('2d');
-            if (window.stochasticChartInstance) window.stochasticChartInstance.destroy();
-            window.stochasticChartInstance = new Chart(stochasticCtx, {
-                type: 'line',
-                data: {
-                    labels: data.timestamps,
-                    datasets: [{
-                        data: data.stochastic,
-                        borderColor: '#f59e0b',
-                        borderWidth: 2,
-                        tension: 0.3,
-                        pointRadius: 0
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: { x: { display: false }, y: { min: 0, max: 100, display: false } },
-                    plugins: { legend: { display: false } }
-                }
-            });
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            x: {
+                                type: 'time',
+                                time: { unit: 'minute' }, 
+                                adapters: { date: { locale: moment.locale() } },
+                                grid: { display: false }
+                            },
+                            y: {
+                                grid: { color: 'rgba(255, 255, 255, 0.05)' }
+                            }
+                        },
+                        plugins: {
+                            legend: { display: true, labels: { color: 'var(--light)'} },
+                            tooltip: { mode: 'index', intersect: false }
+                        }
+                    }
+                });
+            } else {
+                console.error("No data to display or chartTypeToRender not recognized. chartTypeToRender:", chartTypeToRender, 
+                    "ohlcv_candles available:", !!apiData.ohlcv_candles, 
+                    "ohlcv_candles length:", apiData.ohlcv_candles ? apiData.ohlcv_candles.length : 'N/A',
+                    "timestamps available:", !!apiData.timestamps,
+                    "prices available:", !!apiData.prices);
+                // Optionally clear canvas or show "No data" message
+                if (window.priceChartInstance) window.priceChartInstance.destroy(); // Ensure it's blank
+                 priceCtx.clearRect(0, 0, priceCtx.canvas.width, priceCtx.canvas.height); // Clear canvas
+                 priceCtx.fillStyle = 'var(--gray)';
+                 priceCtx.textAlign = 'center';
+                 priceCtx.fillText("No data to display for selected chart type/timeframe.", priceCtx.canvas.width / 2, priceCtx.canvas.height / 2);
+            }
         }
 
         document.addEventListener('DOMContentLoaded', async function() {
+            // Register financial chart types
+            if (typeof Chart !== 'undefined' && Chart.FinancialController) { // For chartjs-chart-financial v0.1.x
+                 Chart.register(Chart.FinancialController, Chart.OhlcController, Chart.CandlestickController, Chart.OhlcElement, Chart.CandlestickElement);
+                 console.log('Financial chart types registered (v0.1.x style).');
+            } else if (typeof Chart !== 'undefined' && Chart.controllers && Chart.controllers.candlestick) { // For chartjs-chart-financial v0.2.x+
+                 // For v0.2.0 and later, it might auto-register or be part of the main Chart object upon import.
+                 // If using <script> tag, it should auto-register.
+                 console.log('Financial chart types assumed to be registered (v0.2.x+ style or auto-registered).');
+            } else {
+                 console.warn('chartjs-chart-financial controllers not found or failed to register. Candlestick charts may not work.');
+            }
+
             // Add connection status indicator
             let connectionStatus = document.createElement('span');
             connectionStatus.id = 'connectionStatus';
             connectionStatus.style.marginLeft = '12px';
             connectionStatus.style.fontWeight = 'bold';
-            connectionStatus.style.fontSize = '15px';
-            connectionStatus.style.verticalAlign = 'middle';
-            document.getElementById('connectBtn').parentNode.appendChild(connectionStatus);
+            connectionStatus.style.fontSize = '15px'; // Maintained style
+            connectionStatus.style.verticalAlign = 'middle'; // Maintained style
+            // Ensure connectBtn is defined before trying to access its parentNode
+            const connectBtn = document.getElementById('connectBtn');
+            if (connectBtn) {
+                 connectBtn.parentNode.appendChild(connectionStatus);
+            }
+
+            const currencySelector = document.getElementById('currencySelector');
+            const chartTitleElement = document.querySelector('.chart-title');
+            // Assuming there's an element for the symbol in market overview, e.g., with id="marketOverviewSymbol"
+            // Let's target the div that contains "USD/JPY • Forex" text.
+            // This is fragile; a more specific ID or class would be better.
+            const marketOverviewSymbolElement = document.querySelector('.market-overview div:nth-child(3)');
+
 
             function setStatus(text, color) {
                 connectionStatus.textContent = text;
-                connectionStatus.style.color = color;
+                connectionStatus.style.color = color; // Use CSS variables for colors
             }
+
+            // Initial state
+            setStatus("Disconnected", "var(--gray)");
+            currentSelectedSymbol = currencySelector.value; // Initialize global symbol
+            if (chartTitleElement) {
+                chartTitleElement.textContent = `Market Price - ${currentSelectedSymbol}`;
+            }
+            if(marketOverviewSymbolElement) { // Update market overview symbol display
+                marketOverviewSymbolElement.textContent = `${currentSelectedSymbol} • Forex`; // Assuming all are Forex for now
+            }
+
+            // const connectBtn = document.getElementById('connectBtn'); // Already defined above
+            if (connectBtn) {
+                connectBtn.innerHTML = '<i class="fas fa-plug"></i> Connect to API';
+                connectBtn.style.background = 'var(--primary)';
+                connectBtn.disabled = false; // Ensure button is enabled initially
+            }
+
+            // Event listener for currency selector change
+            currencySelector.addEventListener('change', async function(event) {
+                const newSymbolValue = event.target.value;
+                const selectedSymbolText = event.target.options[event.target.selectedIndex].text; // Get the display text
+                const symbolNoteEl = document.getElementById('symbolNote');
+
+                if (symbolNoteEl) { // Check if element exists
+                    if (selectedSymbolText === 'Gold/USD') {
+                        symbolNoteEl.style.display = 'block';
+                    } else {
+                        symbolNoteEl.style.display = 'none';
+                    }
+                }
+
+                console.log(`Symbol changed to: ${newSymbolValue} (Display: ${selectedSymbolText})`);
+                currentSelectedSymbol = newSymbolValue; // Update global symbol
+
+                setStatus(`Switching to ${newSymbolValue}...`, 'var(--warning)');
+                currencySelector.disabled = true;
+
+                // Optionally clear charts or show loading state on them
+                // For example, clear price display immediately
+                document.querySelector('.price-display').textContent = '--';
+                // updateCharts({timestamps:[], prices:[], rsi:[], macd:[], bollinger_upper:[], bollinger_middle:[], bollinger_lower:[], stochastic:[], volumes:[]}, newSymbolValue);
+
+
+                try {
+                    const response = await fetch('/api/set_symbol', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ symbol: newSymbolValue })
+                    });
+                    const result = await response.json();
+
+                    if (response.ok && result.status === 'symbol_updated') {
+                        if (chartTitleElement) {
+                            chartTitleElement.textContent = `Market Price - ${result.new_symbol}`;
+                        }
+                        if (marketOverviewSymbolElement) { // Update market overview symbol display
+                             marketOverviewSymbolElement.textContent = `${result.new_symbol} • Forex`;
+                        }
+                        setStatus(`Switched to ${result.new_symbol}`, 'var(--success)');
+                        // Data will be updated by the poller. Optionally trigger an immediate poll:
+                        // clearTimeout(pollTimeoutId); pollMarketData();
+                    } else {
+                        const errorMsg = result.message || 'Failed to switch symbol.';
+                        console.error('Error switching symbol:', errorMsg);
+                        setStatus(`Error: ${errorMsg}`, 'var(--danger)');
+                        // Revert selector if needed, or alert user
+                        currencySelector.value = currentSelectedSymbol; // Revert to last known good symbol if API call fails
+                        currentSelectedSymbol = currencySelector.value; // Ensure global is also reverted
+                        alert(`Failed to switch symbol: ${errorMsg}`);
+                    }
+                } catch (error) {
+                    console.error('Exception when calling /api/set_symbol:', error);
+                    setStatus('Symbol switch failed (Network)', 'var(--danger)');
+                    currencySelector.value = currentSelectedSymbol; // Revert
+                    currentSelectedSymbol = currencySelector.value;
+                    alert('Error switching symbol. Check network or backend.');
+                } finally {
+                    currencySelector.disabled = false;
+                }
+            });
+
 
             // Poll the Python backend for real market data every 2 seconds
             let polling = true;
+            let pollTimeoutId = null; 
             async function pollMarketData() {
                 if (!polling) return;
                 try {
-                    const data = await fetchMarketData();
-                    updateCharts(data);
-                    document.querySelector('.price-display').textContent = data.prices.length ? data.prices[data.prices.length-1].toFixed(2) : '--';
-                } catch (e) {
-                    setStatus('No Data', '#ef4444');
-                }
-                setTimeout(pollMarketData, 2000);
-            }
-            pollMarketData();
+                    const data = await fetchMarketData(); 
+                    if (data) { // Check if data is not null/undefined
+                        if (data.prices && data.prices.length > 0) {
+                            updateCharts(data, currentSelectedSymbol); // Update main price chart
+                            document.querySelector('.price-display').textContent = data.prices[data.prices.length - 1].toFixed(2);
+                        } else {
+                            // Clear main price chart if no price data but data object exists
+                            updateCharts({ timestamps: [], prices: [] }, currentSelectedSymbol); 
+                            document.querySelector('.price-display').textContent = '--';
+                        }
+                        updateAnalysisTable(data); // Update the new analysis table
 
-            // Connect button functionality
-            document.getElementById('connectBtn').addEventListener('click', function() {
+                        // Helper function to update prediction items
+                        function updatePredictionItem(indicatorName, state, trendClass) {
+                            const items = document.querySelectorAll('.prediction-card .prediction-item');
+                            items.forEach(item => {
+                                const labelEl = item.querySelector('div:first-child');
+                                if (labelEl && labelEl.textContent.includes(indicatorName)) {
+                                    const stateEl = item.querySelector('div:nth-child(2)');
+                                    if (stateEl) {
+                                        stateEl.textContent = state; // Set the text
+                                        stateEl.className = ''; // Clear existing classes
+                                        stateEl.classList.add('prediction-state-text'); // Add common class
+                                        if (trendClass) { // trendClass will now be like 'prediction-state-bullish'
+                                            stateEl.classList.add(trendClass);
+                                        } else {
+                                            stateEl.classList.add('prediction-state-neutral'); // Default if no specific class
+                                        }
+                                    }
+                                }
+                            });
+                        }
+
+                        // Function to map backend prediction states to frontend display and CSS classes
+                        function getPredictionDisplay(state) {
+                            let cssClass = 'prediction-state-neutral'; // Default
+                            if (state === 'Oversold') cssClass = 'prediction-state-oversold';
+                            else if (state === 'Overbought') cssClass = 'prediction-state-overbought';
+                            else if (state === 'Bullish') cssClass = 'prediction-state-bullish';
+                            else if (state === 'Bearish') cssClass = 'prediction-state-bearish';
+                            else if (state === 'Neutral') cssClass = 'prediction-state-neutral';
+                            // 'Buy' and 'Sell' signals are typically for the table, prediction states are more descriptive.
+                            return { text: state, className: cssClass };
+                        }
+
+                        // Update Indicator Predictions Card
+                        if (data.rsi_prediction_state !== undefined) {
+                            const rsiDisplay = getPredictionDisplay(data.rsi_prediction_state);
+                            updatePredictionItem('RSI', rsiDisplay.text, rsiDisplay.className);
+                        }
+                        if (data.stochastic_prediction_state !== undefined) {
+                            const stochDisplay = getPredictionDisplay(data.stochastic_prediction_state);
+                            updatePredictionItem('Stochastic', stochDisplay.text, stochDisplay.className);
+                        }
+                        if (data.macd_prediction_state !== undefined) {
+                            const macdDisplay = getPredictionDisplay(data.macd_prediction_state);
+                            updatePredictionItem('MACD', macdDisplay.text, macdDisplay.className);
+                        }
+                        if (data.cci_20_prediction_state !== undefined) {
+                            const cciDisplay = getPredictionDisplay(data.cci_20_prediction_state);
+                            const items = document.querySelectorAll('.prediction-card .prediction-item');
+                            items.forEach(item => {
+                                const labelEl = item.querySelector('div:first-child');
+                                if (labelEl && labelEl.textContent.startsWith('Bollinger Bands')) { // Still using this to find the CCI row
+                                    labelEl.textContent = 'CCI (20)'; 
+                                    updatePredictionItem('CCI (20)', cciDisplay.text, cciDisplay.className); 
+                                }
+                            });
+                        }
+                        // Note: The 'Volume' prediction item remains static.
+
+                        // Update Market Overview Card
+                        const high24hEl = document.querySelector('.market-overview .stats-grid .stat-card:nth-child(1) .stat-value');
+                        if (high24hEl && data.high_24h !== undefined) {
+                            high24hEl.textContent = typeof data.high_24h === 'number' ? data.high_24h.toFixed(2) : data.high_24h;
+                        }
+
+                        const low24hEl = document.querySelector('.market-overview .stats-grid .stat-card:nth-child(2) .stat-value');
+                        if (low24hEl && data.low_24h !== undefined) {
+                            low24hEl.textContent = typeof data.low_24h === 'number' ? data.low_24h.toFixed(2) : data.low_24h;
+                        }
+
+                        const volume24hEl = document.querySelector('.market-overview .stats-grid .stat-card:nth-child(3) .stat-value');
+                        if (volume24hEl && data.volume_24h !== undefined) {
+                            if (typeof data.volume_24h === 'number') {
+                                volume24hEl.textContent = data.volume_24h.toLocaleString();
+                            } else {
+                                volume24hEl.textContent = data.volume_24h;
+                            }
+                        }
+
+                        const sentimentEl = document.querySelector('.market-overview .stats-grid .stat-card:nth-child(4) .stat-value');
+                        if (sentimentEl && data.market_sentiment_text !== undefined) {
+                            sentimentEl.textContent = data.market_sentiment_text;
+                            // Clear existing sentiment classes
+                            sentimentEl.classList.remove('sentiment-value-bullish', 'sentiment-value-bearish', 'sentiment-value-neutral', 'trend-up', 'trend-down');
+                            if (data.market_sentiment_text === 'Bullish') {
+                                sentimentEl.classList.add('sentiment-value-bullish');
+                            } else if (data.market_sentiment_text === 'Bearish') {
+                                sentimentEl.classList.add('sentiment-value-bearish');
+                            } else { // Neutral or N/A
+                                sentimentEl.classList.add('sentiment-value-neutral');
+                            }
+                        }
+                        
+                        // Status update logic based on connection and data availability
+                       if (connectionStatus.textContent.includes("Data") || connectionStatus.textContent.includes("No Data")) {
+                           // Assuming if connectBtn says "Connected", we are good.
+                           if(connectBtn && connectBtn.textContent.includes("Connected")) {
+                               setStatus('Connected', 'var(--success)');
+                           } else if (connectBtn && connectBtn.textContent.includes("Connect to API")){ // if we are not connected, show neutral
+                                setStatus('Disconnected', 'var(--gray)');
+                           } else {
+                               setStatus('Data Available', 'var(--gray)'); 
+                           }
+                       }
+                    } else {
+                         // This case might occur if backend returns empty data but not an error
+                        document.querySelector('.price-display').textContent = '--';
+                        if(connectBtn && connectBtn.textContent.includes("Connected")) { // Only show "No Data" if we expect to be connected
+                            setStatus('No Data', 'var(--warning)');
+                        }
+                    }
+                } catch (e) {
+                    // fetchMarketData already sets "Data Fetch Error", so this is redundant unless it's a different error.
+                    console.error("Error in pollMarketData:", e.message);
+                    document.querySelector('.price-display').textContent = 'Error';
+                     // If polling fails, and we thought we were connected, update status.
+                    if (connectBtn && connectBtn.textContent.includes("Connected")) {
+                         setStatus('Data Error', 'var(--danger)');
+                    }
+                }
+                if (polling) { // Check again in case polling was stopped during await
+                   pollTimeoutId = setTimeout(pollMarketData, 2000);
+                }
+            }
+
+            // Initial table setup with N/A values
+            const initialEmptyDataForTable = {};
+            analysisTableConfig.forEach(item => {
+                initialEmptyDataForTable[item.key] = []; // Initialize with empty arrays for indicator values
+                if (item.signalKey) {
+                    initialEmptyDataForTable[item.signalKey] = 'N/A'; // Initialize signal strings to 'N/A'
+                }
+            });
+            updateAnalysisTable(initialEmptyDataForTable);
+            
+            // Initialize chart controls and add event listeners
+            const chartTypeSelectEl = document.getElementById('chartTypeSelect');
+            const timeframeButtons = document.querySelectorAll('.timeframe-selector .time-btn');
+
+            function setTimeframeButtonsState(disabled) {
+                timeframeButtons.forEach(btn => {
+                    btn.disabled = disabled;
+                    if (disabled) {
+                        btn.style.opacity = '0.5'; // Visually indicate disabled state
+                        btn.style.cursor = 'not-allowed';
+                    } else {
+                        btn.style.opacity = '1';
+                        btn.style.cursor = 'pointer';
+                    }
+                });
+            }
+
+            if (chartTypeSelectEl) {
+                chartTypeSelectEl.value = 'tick'; // Default to 'tick'
+                // Initial state based on default chart type
+                if (chartTypeSelectEl.value === 'tick') {
+                    setTimeframeButtonsState(true);
+                } else {
+                    setTimeframeButtonsState(false);
+                }
+
+                chartTypeSelectEl.addEventListener('change', function(event) {
+                    const newChartType = event.target.value;
+                    jsFrontendChartType = newChartType; // Update global JS state
+                    console.log(`jsFrontendChartType explicitly set to: ${jsFrontendChartType}`); 
+
+                    const activeTimeframeButton = document.querySelector('.timeframe-selector .time-btn.active');
+                    const currentTimeframe = activeTimeframeButton ? activeTimeframeButton.dataset.timeframe : '1H'; // Default if somehow none active
+                    
+                    if (newChartType === 'tick') {
+                        setTimeframeButtonsState(true);
+                        // Optionally, if switching to tick, we might not want to send a timeframe_str or a default one.
+                        // For now, it sends the last active or default '1H'. Backend should handle this gracefully for 'tick' type.
+                    } else { // 'ohlcv'
+                        setTimeframeButtonsState(false);
+                    }
+                    
+                    console.log(`Chart type changed to: ${newChartType}, current timeframe: ${currentTimeframe}`);
+                    setStatus(`Loading ${newChartType === 'ohlcv' ? 'Candlestick' : 'Line'} chart...`, 'var(--warning)');
+                    
+                    fetch('/api/set_chart_settings', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ chart_type: newChartType, timeframe_str: currentTimeframe })
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.status === 'success') {
+                            setStatus(`Chart: ${data.current_chart_type}, Granularity: ${data.current_granularity_seconds}s`, 'var(--gray)');
+                            // PollMarketData will pick up new data. Optionally trigger immediate poll or clear chart.
+                        } else {
+                            console.error('Failed to set chart settings:', data.message);
+                            setStatus(`Error: ${data.message || 'Chart settings update failed.'}`, 'var(--danger)');
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error setting chart settings:', error);
+                        setStatus('Error: Settings update failed (Network).', 'var(--danger)');
+                    });
+                });
+            }
+
+            if (timeframeButtons) {
+                timeframeButtons.forEach(button => {
+                    button.addEventListener('click', function() {
+                        if (this.classList.contains('active')) {
+                            return; 
+                        }
+                        const newTimeframe = this.dataset.timeframe;
+                        
+                        // When a timeframe button is clicked, it implies OHLCV chart.
+                        const chartTypeSelectEl = document.getElementById('chartTypeSelect'); 
+                        if (chartTypeSelectEl) { 
+                           chartTypeSelectEl.value = 'ohlcv'; // Force dropdown to 'ohlcv'
+                           setTimeframeButtonsState(false); // Ensure buttons are enabled
+                        }
+                        jsFrontendChartType = 'ohlcv'; // Update global JS state
+                        console.log(`jsFrontendChartType explicitly set to 'ohlcv' by timeframe button.`);
+                        
+                        const chartTypeForAPI = 'ohlcv'; // Explicitly use 'ohlcv' for the API call
+
+                        console.log(`Timeframe changed to: ${newTimeframe}, forcing chart type to: ${chartTypeForAPI}`);
+                        setStatus(`Loading ${newTimeframe} OHLCV data...`, 'var(--warning)');
+
+                        timeframeButtons.forEach(btn => btn.classList.remove('active'));
+                        this.classList.add('active');
+
+                        fetch('/api/set_chart_settings', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ chart_type: chartTypeForAPI, timeframe_str: newTimeframe })
+                        })
+                        .then(response => response.json())
+                        .then(data => {
+                            if (data.status === 'success') {
+                                setStatus(`Chart: ${data.current_chart_type}, Granularity: ${data.current_granularity_seconds}s (${newTimeframe})`, 'var(--gray)');
+                            } else {
+                                console.error('Failed to set chart settings:', data.message);
+                                setStatus(`Error: ${data.message || 'Chart settings update failed.'}`, 'var(--danger)');
+                            }
+                        })
+                        .catch(error => {
+                            console.error('Error setting chart settings:', error);
+                            setStatus('Error: Settings update failed (Network).', 'var(--danger)');
+                        });
+                    });
+                });
+            }
+            
+            // Initial check for timeframe buttons based on the default chart type
+            if (chartTypeSelectEl && chartTypeSelectEl.value === 'tick') {
+                setTimeframeButtonsState(true);
+            } else {
+                setTimeframeButtonsState(false);
+            }
+            
+            pollMarketData(); // Start polling
+
+
+            // Settings modal elements
+            const settingsModal = document.getElementById('settingsModal');
+            const settingsCogBtn = document.querySelector('.btn-outline'); // The actual settings button with cog icon
+            const closeSettingsBtn = document.getElementById('closeSettings');
+            const saveAndConnectBtn = document.getElementById('saveSettingsBtn'); // This button saves and attempts connection
+            const derivApiTokenInput = document.getElementById('derivApiToken');
+            const settingsSavedMsg = document.getElementById('settingsSavedMsg');
+
+            function openSettingsModal() {
                 derivApiTokenInput.value = localStorage.getItem('derivApiToken') || '';
                 settingsModal.style.display = 'flex';
-                settingsSavedMsg.style.display = 'none';
-                saveSettingsBtn.onclick = async function() {
+                settingsSavedMsg.style.display = 'none'; // Reset message
+            }
+
+            // Event listener for the "Connect to API" button (main button, not cog)
+            if (connectBtn) {
+                connectBtn.addEventListener('click', function() {
+                    // If already connected, clicking it could show settings or disconnect.
+                    // For now, it will always open settings modal to change token or re-connect.
+                    openSettingsModal();
+                });
+            }
+            
+            // Event listener for the actual "Settings" cog button
+            if (settingsCogBtn) {
+                settingsCogBtn.addEventListener('click', openSettingsModal);
+            }
+            
+            // Close settings modal
+            if (closeSettingsBtn) {
+                closeSettingsBtn.addEventListener('click', function() {
+                    settingsModal.style.display = 'none';
+                });
+            }
+
+            // Handle "Save" button in Settings Modal (which also connects)
+            if (saveAndConnectBtn) {
+                saveAndConnectBtn.addEventListener('click', async function() {
                     const token = derivApiTokenInput.value.trim();
-                    localStorage.setItem('derivApiToken', token);
-                    settingsSavedMsg.style.display = 'block';
-                    setStatus('Connecting...', '#f59e0b');
-                    // POST token to backend to start Deriv connection
+                    localStorage.setItem('derivApiToken', token); // Save token locally
+                    
+                    settingsSavedMsg.style.display = 'block'; // Show "Saved!" message
+                    setTimeout(() => { settingsSavedMsg.style.display = 'none';}, 2000); // Hide after 2s regardless of connection outcome
+
+                    setStatus('Connecting...', 'var(--warning)');
+                    if (connectBtn) {
+                        connectBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Connecting...';
+                        connectBtn.style.background = 'var(--warning)';
+                        connectBtn.disabled = true;
+                    }
+
                     try {
                         const resp = await fetch('http://127.0.0.1:5000/api/connect', {
                             method: 'POST',
@@ -807,50 +1339,46 @@
                             body: JSON.stringify({ token })
                         });
                         const result = await resp.json();
-                        if (result.status === 'started') {
-                            setStatus('Connected', '#22c55e');
-                            document.getElementById('connectBtn').innerHTML = '<i class="fas fa-check"></i> Connected';
-                            document.getElementById('connectBtn').style.background = 'var(--success)';
-                            setTimeout(()=>{ settingsModal.style.display = 'none'; }, 1000);
+
+                        if (resp.ok && result.status === 'started') {
+                            setStatus('Connected', 'var(--success)');
+                            if (connectBtn) {
+                                connectBtn.innerHTML = '<i class="fas fa-check"></i> Connected';
+                                connectBtn.style.background = 'var(--success)';
+                            }
+                            // Close modal on successful connection after a short delay for "Saved!" msg
+                            setTimeout(() => { if (settingsModal) settingsModal.style.display = 'none'; }, 1000);
                         } else {
-                            setStatus('Failed', '#ef4444');
+                            const errorMsg = result.error || `Connection failed (status ${resp.status}). Check token or backend.`;
+                            setStatus(errorMsg, 'var(--danger)');
+                            if (connectBtn) {
+                                connectBtn.innerHTML = '<i class="fas fa-plug"></i> Connect to API';
+                                connectBtn.style.background = 'var(--primary)';
+                            }
+                            alert(`Connection Failed: ${errorMsg}`); // Show error in alert
                         }
                     } catch (e) {
-                        setStatus('Failed', '#ef4444');
-                        alert('Failed to connect to backend.');
+                        console.error('Failed to connect to backend API:', e);
+                        setStatus('Connection Error (Backend)', 'var(--danger)');
+                        if (connectBtn) {
+                            connectBtn.innerHTML = '<i class="fas fa-plug"></i> Connect to API';
+                            connectBtn.style.background = 'var(--primary)';
+                        }
+                        alert('Failed to connect to backend. Is the server running and accessible?');
+                    } finally {
+                        if (connectBtn) {
+                            connectBtn.disabled = false;
+                        }
                     }
-                };
-            });
+                });
+            }
         });
         
-        // Settings modal logic
-        const settingsModal = document.getElementById('settingsModal');
-        const settingsBtn = document.querySelector('.btn-outline');
-        const closeSettings = document.getElementById('closeSettings');
-        const saveSettingsBtn = document.getElementById('saveSettingsBtn');
-        const derivApiTokenInput = document.getElementById('derivApiToken');
-        const settingsSavedMsg = document.getElementById('settingsSavedMsg');
-
-        // Open modal
-        settingsBtn.addEventListener('click', function() {
-            derivApiTokenInput.value = localStorage.getItem('derivApiToken') || '';
-            settingsModal.style.display = 'flex';
-            settingsSavedMsg.style.display = 'none';
-        });
-        // Close modal
-        closeSettings.addEventListener('click', function() {
-            settingsModal.style.display = 'none';
-        });
-        // Save token
-        saveSettingsBtn.addEventListener('click', function() {
-            localStorage.setItem('derivApiToken', derivApiTokenInput.value.trim());
-            settingsSavedMsg.style.display = 'block';
-            setTimeout(()=>{ settingsModal.style.display = 'none'; }, 1000);
-        });
-        // Utility to get token
-        function getDerivApiToken() {
-            return localStorage.getItem('derivApiToken') || '';
-        }
+        // The old, separate saveSettingsBtn listener is removed as its functionality 
+        // is now part of the saveAndConnectBtn logic triggered from connectBtn flow.
+        // Utility to get token (can be removed if not used elsewhere)
+        // function getDerivApiToken() {
+        
     </script>
 </body>
 </html>
