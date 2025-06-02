@@ -11,7 +11,7 @@ import json
 import queue
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s')
 
 app = Flask(__name__)
 CORS(app)
@@ -56,6 +56,7 @@ def calculate_indicators(prices_list: list[float]):
     """
     Calculates various technical indicators based on a list of prices.
     """
+    logging.debug(f"calculate_indicators received prices_list length: {len(prices_list)}, last 5: {prices_list[-5:] if len(prices_list) >= 5 else prices_list}")
     if not prices_list:
         logging.warning("[Indicators] Price list is empty. Cannot calculate indicators.")
         # Return empty lists of the correct structure if prices_list is empty
@@ -80,16 +81,19 @@ def calculate_indicators(prices_list: list[float]):
     rs[(gain == 0) & (loss == 0)] = np.nan # Or some other suitable value for RSI to be 50 later
 
     rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50) # Fill initial NaNs and specific (gain=0, loss=0) NaNs with 50
-    logging.debug(f"[Indicators] RSI calculated. Head: {rsi.head().tolist()}, Tail: {rsi.tail().tolist()}")
+    rsi_series = rsi.fillna(50) # Fill initial NaNs and specific (gain=0, loss=0) NaNs with 50
+    # logging.debug(f"[Indicators] RSI calculated. Head: {rsi_series.head().tolist()}, Tail: {rsi_series.tail().tolist()}") # Original detailed log
+    logging.debug(f"calculate_indicators computed RSI, length: {len(rsi_series)}, last 5: {rsi_series.tolist()[-5:] if len(rsi_series) >= 5 else rsi_series.tolist()}")
+
 
     # MACD
     # Using adjust=False for EWMA is common in financial calculations.
     # This calculates the MACD line. Signal line and histogram are not part of this.
     logging.debug("[Indicators] MACD: Calculating MACD line (not signal line or histogram).")
-    macd_line = prices_series.ewm(span=12, adjust=False).mean() - prices_series.ewm(span=26, adjust=False).mean()
-    macd_line = macd_line.fillna(0) # Fill initial NaNs with 0
-    logging.debug(f"[Indicators] MACD line calculated. Head: {macd_line.head().tolist()}, Tail: {macd_line.tail().tolist()}")
+    macd_line_series = prices_series.ewm(span=12, adjust=False).mean() - prices_series.ewm(span=26, adjust=False).mean()
+    macd_line_series = macd_line_series.fillna(0) # Fill initial NaNs with 0
+    # logging.debug(f"[Indicators] MACD line calculated. Head: {macd_line_series.head().tolist()}, Tail: {macd_line_series.tail().tolist()}") # Original detailed log
+    logging.debug(f"calculate_indicators computed MACD, length: {len(macd_line_series)}, last 5: {macd_line_series.tolist()[-5:] if len(macd_line_series) >= 5 else macd_line_series.tolist()}")
 
     # Bollinger Bands
     # Using ddof=0 for population standard deviation, common in some platforms.
@@ -118,8 +122,8 @@ def calculate_indicators(prices_list: list[float]):
     # Ensure all returned lists are of the same length as the input prices_series
     # Pandas rolling/ewm operations with default settings should preserve index and length, filling leading values with NaN.
     return {
-        'rsi': rsi.tolist(),
-        'macd': macd_line.tolist(),
+        'rsi': rsi_series.tolist(),
+        'macd': macd_line_series.tolist(),
         'bollinger_upper': bollinger_upper.tolist(),
         'bollinger_middle': bollinger_middle.tolist(),
         'bollinger_lower': bollinger_lower.tolist(),
@@ -224,14 +228,21 @@ def on_message_for_deriv(ws, message):
                     if len(market_data[k]) > 100:
                         market_data[k] = market_data[k][-100:]
 
-                current_prices = market_data['prices']
-                logging.debug(f"[Deriv WS] Passing {len(current_prices)} prices to calculate_indicators.")
+                current_prices = market_data['prices'][:] # Use a copy for calculation
+                logging.debug(f"Before indicator calculation for SYMBOL: {SYMBOL} - market_data['prices'] length: {len(market_data['prices'])}, last 5 prices: {market_data['prices'][-5:] if len(market_data['prices']) >= 5 else market_data['prices']}")
+
+                updated_indicators = {} # Define to ensure it's available in case of exception
                 try:
-                    indicators = calculate_indicators(current_prices)
-                    for key_indicator in indicators:
+                    updated_indicators = calculate_indicators(current_prices) # Renamed for clarity
+                    logging.debug(f"After indicator calculation for SYMBOL: {SYMBOL} - calculated RSI length: {len(updated_indicators.get('rsi', []))}, last 5 RSI: {updated_indicators.get('rsi', [])[-5:] if len(updated_indicators.get('rsi', [])) >= 5 else updated_indicators.get('rsi', [])}")
+                    logging.debug(f"After indicator calculation for SYMBOL: {SYMBOL} - calculated MACD length: {len(updated_indicators.get('macd', []))}, last 5 MACD: {updated_indicators.get('macd', [])[-5:] if len(updated_indicators.get('macd', [])) >= 5 else updated_indicators.get('macd', [])}")
+
+                    for key_indicator in updated_indicators:
                         # Ensure calculated indicators list is also sliced if shorter than 100 for some reason
                         # (though calculate_indicators should return full length)
-                        market_data[key_indicator] = indicators[key_indicator][-100:]
+                        indicator_values = updated_indicators[key_indicator]
+                        market_data[key_indicator] = indicator_values[-100:]
+                        logging.debug(f"Updating market_data['{key_indicator}'] for SYMBOL: {SYMBOL}. Length: {len(indicator_values)}. Last 5 values assigned: {market_data[key_indicator][-5:] if len(market_data[key_indicator]) >= 5 else market_data[key_indicator]}")
                 except Exception as e_calc:
                     logging.error(f"[Deriv WS] Error calling calculate_indicators: {e_calc}", exc_info=True)
                     # Decide how to handle: skip update for indicators, or clear them, or use last known good
