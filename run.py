@@ -35,7 +35,18 @@ market_data = {
 # Deriv API config
 DERIV_APP_ID = 1089
 DERIV_WS_URL = f"wss://ws.binaryws.com/websockets/v3?app_id={DERIV_APP_ID}"
-SYMBOL = 'frxUSDJPY'  # Default symbol, can be parameterized
+
+DERIV_SYMBOL_MAPPING = {
+    "USD/JPY": "frxUSDJPY",
+    "EUR/USD": "frxEURUSD",
+    "GBP/USD": "frxGBPUSD",
+    "AUD/USD": "frxAUDUSD",
+    "USD/CAD": "frxUSDCAD",
+    "BTC/USD": "cryBTCUSD", # Assumption
+    "ETH/USD": "cryETHUSD"  # Assumption
+}
+
+SYMBOL = "frxUSDJPY"  # Default symbol, MUST be in Deriv API format
 API_TOKEN = ''  # Set your token here or via environment
 current_tick_subscription_id = None # Store the ID of the active tick subscription
 
@@ -402,14 +413,22 @@ def connect_get():
 def set_symbol():
     global SYMBOL, market_data, ws_app, API_TOKEN, current_tick_subscription_id
     data = request.get_json()
-    new_symbol = data.get('symbol')
+    new_symbol_value = data.get('symbol') # User-friendly symbol, e.g., "USD/JPY"
 
-    if not new_symbol or not isinstance(new_symbol, str):
-        logging.error(f"[/api/set_symbol] Invalid symbol provided: {new_symbol}")
+    if not new_symbol_value or not isinstance(new_symbol_value, str):
+        logging.error(f"[/api/set_symbol] Invalid symbol value provided: {new_symbol_value}")
         return jsonify({'status': 'error', 'message': 'Invalid symbol format'}), 400
 
-    logging.info(f"[/api/set_symbol] Received request to change symbol from {SYMBOL} to {new_symbol}")
-    SYMBOL = new_symbol
+    actual_deriv_symbol = DERIV_SYMBOL_MAPPING.get(new_symbol_value, new_symbol_value)
+    logging.info(f"Symbol received from frontend: '{new_symbol_value}', Mapped to Deriv symbol: '{actual_deriv_symbol}'")
+
+    if actual_deriv_symbol == new_symbol_value and not any(new_symbol_value.startswith(p) for p in ['frx', 'cry', 'R_']):
+        logging.warning(f"Symbol '{new_symbol_value}' was not found in DERIV_SYMBOL_MAPPING and might not be a valid Deriv API symbol format.")
+
+    # SYMBOL global should always store the Deriv API format
+    logging.info(f"[/api/set_symbol] Attempting to change global SYMBOL from '{SYMBOL}' to '{actual_deriv_symbol.strip()}'")
+    SYMBOL = actual_deriv_symbol.strip()
+
 
     # Reset market_data
     with market_data_lock:
