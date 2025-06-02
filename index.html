@@ -554,7 +554,7 @@
             { key: 'prices', label: 'Price', precision: 2 }, // 'key' here refers to the data field for the value
             { key: 'rsi', label: 'RSI (14)', precision: 2, signalKey: 'rsi_signal' },
             { key: 'stochastic', label: 'Stochastic (14,3,3)', precision: 2, signalKey: 'stochastic_signal' },
-            { key: 'macd', label: 'MACD (12,26,9)', precision: 2, signalKey: 'macd_signal' },
+            { key: 'macd', label: 'MACD (12,26,9)', precision: 2, signalKey: 'macd_signal' }, // This is the MACD line
             { key: 'cci_20', label: 'CCI (20)', precision: 2, signalKey: 'cci_20_signal' },
             { key: 'bollinger_upper', label: 'Bollinger Upper', precision: 2 },
             { key: 'bollinger_middle', label: 'Bollinger Middle', precision: 2 },
@@ -566,12 +566,12 @@
             { key: 'sma_30', label: 'SMA (30)', precision: 2 },
             { key: 'ema_30', label: 'EMA (30)', precision: 2 },
             { key: 'sma_50', label: 'SMA (50)', precision: 2 },
-            { key: 'ema_50', label: 'EMA (50)', precision: 2, signalKey: 'price_ema_50_signal' },
+            { key: 'ema_50', label: 'EMA (50)', precision: 2, signalKey: 'price_ema_50_signal' }, // EMA50 will show its own value, and the Price/EMA50 cross signal
             { key: 'sma_100', label: 'SMA (100)', precision: 2 },
             { key: 'ema_100', label: 'EMA (100)', precision: 2 },
             { key: 'sma_200', label: 'SMA (200)', precision: 2 },
             { key: 'ema_200', label: 'EMA (200)', precision: 2 },
-            { key: 'volumes', label: 'Volume', precision: 0 }
+            { key: 'volumes', label: 'Volume', precision: 0 } // Assuming 'volumes' is the key
         ];
 
         function updateAnalysisTable(apiData) {
@@ -606,20 +606,22 @@
                 // Styling for signal cell
                 cellSignal.style.padding = '8px';
                 cellSignal.style.borderBottom = '1px solid var(--border)';
-                cellSignal.style.textAlign = 'left'; // Or 'center'
+                cellSignal.style.textAlign = 'left'; // Or 'center' as preferred
 
-                if (item.signalKey && apiData[item.signalKey]) {
+                if (item.signalKey && apiData[item.signalKey] !== undefined) { // Check undefined to allow "Neutral" or other strings
                     const signalValue = apiData[item.signalKey];
-                    cellSignal.textContent = signalValue;
+                    cellSignal.textContent = signalValue; // Display the signal string ('Buy', 'Sell', 'Neutral', 'N/A')
+
+                    // Apply color styling based on signalValue
                     if (signalValue === 'Buy') {
-                        cellSignal.style.color = 'var(--success)';
+                        cellSignal.style.color = 'var(--success)'; // Green
                     } else if (signalValue === 'Sell') {
-                        cellSignal.style.color = 'var(--danger)';
-                    } else {
+                        cellSignal.style.color = 'var(--danger)';  // Red
+                    } else { // Neutral, N/A, or any other string
                         cellSignal.style.color = 'var(--gray)';
                     }
                 } else {
-                     cellSignal.style.color = 'var(--gray)'; // Default for '-' or 'N/A'
+                     cellSignal.style.color = 'var(--gray)'; // Default for '-' or if signalKey is not present
                 }
             });
         }
@@ -823,6 +825,94 @@
                         }
                         updateAnalysisTable(data); // Update the new analysis table
 
+                        // Helper function to update prediction items
+                        function updatePredictionItem(indicatorName, state, trendClass) {
+                            const items = document.querySelectorAll('.prediction-card .prediction-item');
+                            items.forEach(item => {
+                                const labelEl = item.querySelector('div:first-child');
+                                if (labelEl && labelEl.textContent.includes(indicatorName)) { // Use includes for flexibility e.g. "RSI (14)"
+                                    const stateEl = item.querySelector('div:nth-child(2)');
+                                    if (stateEl) {
+                                        stateEl.textContent = state;
+                                        stateEl.className = ''; // Clear existing trend classes
+                                        if (trendClass) {
+                                            stateEl.classList.add(trendClass);
+                                        }
+                                    }
+                                    // Note: Prediction strength dots are not updated by this function.
+                                }
+                            });
+                        }
+
+                        // Function to map backend prediction states to frontend display and classes
+                        function getPredictionDisplay(state) {
+                            let displayClass = '';
+                            if (state === 'Oversold' || state === 'Bullish' || state === 'Buy') { // Consider "Buy" from general signal too
+                                displayClass = 'trend-up'; // Green
+                            } else if (state === 'Overbought' || state === 'Bearish' || state === 'Sell') { // Consider "Sell"
+                                displayClass = 'trend-down'; // Red
+                            }
+                            return { text: state, className: displayClass };
+                        }
+
+                        // Update Indicator Predictions Card
+                        if (data.rsi_prediction_state !== undefined) {
+                            const rsiDisplay = getPredictionDisplay(data.rsi_prediction_state);
+                            updatePredictionItem('RSI', rsiDisplay.text, rsiDisplay.className);
+                        }
+                        if (data.stochastic_prediction_state !== undefined) {
+                            const stochDisplay = getPredictionDisplay(data.stochastic_prediction_state);
+                            updatePredictionItem('Stochastic', stochDisplay.text, stochDisplay.className);
+                        }
+                        if (data.macd_prediction_state !== undefined) {
+                            const macdDisplay = getPredictionDisplay(data.macd_prediction_state);
+                            updatePredictionItem('MACD', macdDisplay.text, macdDisplay.className);
+                        }
+                        if (data.cci_20_prediction_state !== undefined) {
+                            const cciDisplay = getPredictionDisplay(data.cci_20_prediction_state);
+                            // Re-purpose "Bollinger Bands" item for CCI prediction
+                            const items = document.querySelectorAll('.prediction-card .prediction-item');
+                            items.forEach(item => {
+                                const labelEl = item.querySelector('div:first-child');
+                                if (labelEl && labelEl.textContent.startsWith('Bollinger Bands')) {
+                                    labelEl.textContent = 'CCI (20)'; // Change label
+                                    updatePredictionItem('CCI (20)', cciDisplay.text, cciDisplay.className); // Update with new label
+                                }
+                            });
+                        }
+                        // Note: The 'Volume' prediction item remains static as no prediction state for it is generated.
+
+                        // Update Market Overview Card
+                        const high24hEl = document.querySelector('.market-overview .stats-grid .stat-card:nth-child(1) .stat-value');
+                        if (high24hEl && data.high_24h !== undefined) {
+                            high24hEl.textContent = typeof data.high_24h === 'number' ? data.high_24h.toFixed(2) : data.high_24h;
+                        }
+
+                        const low24hEl = document.querySelector('.market-overview .stats-grid .stat-card:nth-child(2) .stat-value');
+                        if (low24hEl && data.low_24h !== undefined) {
+                            low24hEl.textContent = typeof data.low_24h === 'number' ? data.low_24h.toFixed(2) : data.low_24h;
+                        }
+
+                        const volume24hEl = document.querySelector('.market-overview .stats-grid .stat-card:nth-child(3) .stat-value');
+                        if (volume24hEl && data.volume_24h !== undefined) {
+                            if (typeof data.volume_24h === 'number') {
+                                volume24hEl.textContent = data.volume_24h.toLocaleString();
+                            } else {
+                                volume24hEl.textContent = data.volume_24h;
+                            }
+                        }
+
+                        const sentimentEl = document.querySelector('.market-overview .stats-grid .stat-card:nth-child(4) .stat-value');
+                        if (sentimentEl && data.market_sentiment_text !== undefined) {
+                            sentimentEl.textContent = data.market_sentiment_text;
+                            sentimentEl.classList.remove('trend-up', 'trend-down');
+                            if (data.market_sentiment_text === 'Bullish') {
+                                sentimentEl.classList.add('trend-up');
+                            } else if (data.market_sentiment_text === 'Bearish') {
+                                sentimentEl.classList.add('trend-down');
+                            }
+                        }
+
                         // Status update logic based on connection and data availability
                        if (connectionStatus.textContent.includes("Data") || connectionStatus.textContent.includes("No Data")) {
                            // Assuming if connectBtn says "Connected", we are good.
@@ -858,9 +948,9 @@
             // Initial table setup with N/A values
             const initialEmptyDataForTable = {};
             analysisTableConfig.forEach(item => {
-                initialEmptyDataForTable[item.key] = []; // For indicator value lists
-                 if (item.signalKey) {
-                    initialEmptyDataForTable[item.signalKey] = 'N/A'; // For signal strings
+                initialEmptyDataForTable[item.key] = []; // Initialize with empty arrays for indicator values
+                if (item.signalKey) {
+                    initialEmptyDataForTable[item.signalKey] = 'N/A'; // Initialize signal strings to 'N/A'
                 }
             });
             updateAnalysisTable(initialEmptyDataForTable);

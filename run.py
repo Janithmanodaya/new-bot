@@ -9,6 +9,7 @@ import time
 import websocket
 import json
 import queue
+import copy # For deepcopy
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s')
@@ -19,27 +20,27 @@ CORS(app)
 # Thread lock for market_data
 market_data_lock = threading.Lock()
 
-# Global storage for real-time data
-market_data = {
-    'timestamps': [],
-    'prices': [],
-    'volumes': [],
-    'rsi': [],
-    'macd': [],
-    'bollinger_upper': [],
-    'bollinger_middle': [],
-    'bollinger_lower': [],
-    'stochastic': [],
-    'cci_20': [],
+DEFAULT_MARKET_DATA = {
+    'timestamps': [], 'prices': [], 'volumes': [],
+    'rsi': [], 'macd': [], 'bollinger_upper': [], 'bollinger_middle': [],
+    'bollinger_lower': [], 'stochastic': [], 'cci_20': [],
     'sma_10': [], 'sma_20': [], 'sma_30': [], 'sma_50': [], 'sma_100': [], 'sma_200': [],
     'ema_10': [], 'ema_20': [], 'ema_30': [], 'ema_50': [], 'ema_100': [], 'ema_200': [],
     # Signals
-    'rsi_signal': 'N/A',
-    'stochastic_signal': 'N/A',
-    'macd_signal': 'N/A',
-    'cci_20_signal': 'N/A',
-    'price_ema_50_signal': 'N/A',
+    'rsi_signal': 'N/A', 'stochastic_signal': 'N/A', 'macd_signal': 'N/A',
+    'cci_20_signal': 'N/A', 'price_ema_50_signal': 'N/A',
+    'market_sentiment_text': 'N/A', # Added in previous step, ensure it's here
+    # Daily data
+    'high_24h': 'N/A', 'low_24h': 'N/A', 'volume_24h': 'N/A',
+    # Prediction states
+    'rsi_prediction_state': 'N/A',
+    'stochastic_prediction_state': 'N/A',
+    'macd_prediction_state': 'N/A',
+    'cci_20_prediction_state': 'N/A',
 }
+
+# Global storage for real-time data
+market_data = copy.deepcopy(DEFAULT_MARKET_DATA)
 
 # Deriv API config
 DERIV_APP_ID = 1089
@@ -231,6 +232,67 @@ def calculate_indicators(prices_list: list[float]):
 
     logging.debug(f"Generated signals: RSI: {results.get('rsi_signal')}, MACD: {results.get('macd_signal')}, Price/EMA50: {results.get('price_ema_50_signal')}")
 
+    # Market Sentiment Logic
+    signal_keys = ['rsi_signal', 'stochastic_signal', 'macd_signal', 'cci_20_signal', 'price_ema_50_signal']
+    active_signals = [results.get(key) for key in signal_keys if results.get(key) and results.get(key) not in ['N/A', 'Neutral']]
+
+    buy_count = active_signals.count('Buy')
+    sell_count = active_signals.count('Sell')
+
+    if buy_count > sell_count:
+        results['market_sentiment_text'] = 'Bullish'
+    elif sell_count > buy_count:
+        results['market_sentiment_text'] = 'Bearish'
+    else:
+        results['market_sentiment_text'] = 'Neutral'
+
+    logging.debug(f"Sentiment calculation: Buy signals: {buy_count}, Sell signals: {sell_count}, Overall Sentiment: {results['market_sentiment_text']}")
+
+    # Prediction States Generation
+    if not prices_series.empty:
+        # RSI Prediction State
+        if results['rsi'] and len(results['rsi']) > 0:
+            latest_rsi = results['rsi'][-1]
+            if latest_rsi < 30: results['rsi_prediction_state'] = 'Oversold'
+            elif latest_rsi > 70: results['rsi_prediction_state'] = 'Overbought'
+            else: results['rsi_prediction_state'] = 'Neutral'
+        else:
+            results['rsi_prediction_state'] = 'N/A'
+
+        # Stochastic Prediction State
+        if results['stochastic'] and len(results['stochastic']) > 0:
+            latest_stochastic = results['stochastic'][-1]
+            if latest_stochastic < 20: results['stochastic_prediction_state'] = 'Oversold'
+            elif latest_stochastic > 80: results['stochastic_prediction_state'] = 'Overbought'
+            else: results['stochastic_prediction_state'] = 'Neutral'
+        else:
+            results['stochastic_prediction_state'] = 'N/A'
+
+        # MACD Prediction State
+        if results['macd'] and len(results['macd']) > 0:
+            latest_macd = results['macd'][-1]
+            if latest_macd > 0: results['macd_prediction_state'] = 'Bullish'
+            elif latest_macd < 0: results['macd_prediction_state'] = 'Bearish'
+            else: results['macd_prediction_state'] = 'Neutral'
+        else:
+            results['macd_prediction_state'] = 'N/A'
+
+        # CCI Prediction State
+        if results['cci_20'] and len(results['cci_20']) > 0:
+            latest_cci = results['cci_20'][-1]
+            if latest_cci < -100: results['cci_20_prediction_state'] = 'Oversold'
+            elif latest_cci > 100: results['cci_20_prediction_state'] = 'Overbought'
+            else: results['cci_20_prediction_state'] = 'Neutral'
+        else:
+            results['cci_20_prediction_state'] = 'N/A'
+    else:
+        results['rsi_prediction_state'] = 'N/A'
+        results['stochastic_prediction_state'] = 'N/A'
+        results['macd_prediction_state'] = 'N/A'
+        results['cci_20_prediction_state'] = 'N/A'
+
+    logging.debug(f"Prediction States: RSI: {results.get('rsi_prediction_state')}, Stochastic: {results.get('stochastic_prediction_state')}, MACD: {results.get('macd_prediction_state')}, CCI: {results.get('cci_20_prediction_state')}")
+
     # Ensure all returned lists are of the same length as the input prices_series
     # Pandas rolling/ewm operations with default settings should preserve index and length, filling leading values with NaN (before our fillna(0)).
     return results
@@ -240,15 +302,32 @@ def calculate_indicators(prices_list: list[float]):
 ws_thread = None
 ws_app = None
 
+def request_daily_data(ws_app_instance, symbol_to_fetch):
+    if ws_app_instance and ws_app_instance.sock and ws_app_instance.sock.connected:
+        logging.info(f"Requesting daily OHLCV data for {symbol_to_fetch}...")
+        # Using a unique req_id is best practice
+        req_id_daily = f"daily_{symbol_to_fetch}_{int(time.time())}"
+        ws_app_instance.send(json.dumps({
+            "ticks_history": symbol_to_fetch,
+            "style": "candles",
+            "granularity": 86400, # Daily candles (24 hours * 60 minutes * 60 seconds)
+            "end": "latest",    # Get data up to the latest available tick
+            "count": 1,         # We only need the most recent daily candle data
+            "req_id": req_id_daily
+        }))
+    else:
+        logging.warning(f"WebSocket not connected. Cannot request daily data for {symbol_to_fetch}.")
+
 # Enhanced WebSocket Handlers
 def on_open_for_deriv(ws):
     """Called when the WebSocket connection is established."""
     logging.info(f"WebSocket connection opened. Attempting to subscribe to ticks for SYMBOL: {SYMBOL} or authorize.")
+    request_daily_data(ws, SYMBOL) # Request daily data on new connection
     if API_TOKEN:
-        logging.info(f"[Deriv WS] Connection opened. API_TOKEN is present. Attempting to authorize.")
+        logging.info(f"[Deriv WS] API_TOKEN is present. Attempting to authorize.")
         ws.send(json.dumps({"authorize": API_TOKEN}))
     else:
-        logging.info(f"[Deriv WS] Connection opened. No API_TOKEN provided. Subscribing to public ticks for {SYMBOL}.")
+        logging.info(f"[Deriv WS] No API_TOKEN provided. Subscribing to public ticks for {SYMBOL}.")
         ws.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
 
 def on_message_for_deriv(ws, message):
@@ -275,6 +354,8 @@ def on_message_for_deriv(ws, message):
             #     SYMBOL = current_symbol_in_auth
             logging.info(f"[Deriv WS] Subscribing to ticks for {SYMBOL} after successful authorization.")
             ws.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
+            # Also request daily data after successful authorization
+            request_daily_data(ws, SYMBOL)
 
     elif msg_type == 'subscribe': # Handle subscription confirmation
         logging.info(f"Full 'subscribe' response: {message}")
@@ -380,6 +461,33 @@ def on_message_for_deriv(ws, message):
     # else:
         # logging.info(f"[Deriv WS] Received unhandled message type: {msg_type}. Full message: {message}")
 
+    elif data.get('msg_type') == 'candles':
+        # Ideally, match data.get('echo_req', {}).get('req_id') here
+        # with the req_id_daily sent, if we were using a robust req_id system.
+        logging.info(f"Received 'candles' data: {message[:250]}...") # Log snippet
+        candles = data.get('candles', [])
+        if candles:
+            latest_candle = candles[0] # Deriv returns latest candle first with count:1
+            # Candle format: {epoch, open, high, low, close, volume} (volume is optional)
+            if isinstance(latest_candle, dict):
+                high_24h = latest_candle.get('high')
+                low_24h = latest_candle.get('low')
+                # Deriv 'volume' in candles might be actual trade volume or tick count, depending on instrument.
+                # For synthetic indices it's usually tick count. For Forex, it might be absent or different.
+                # For this dashboard, we'll call it 'volume_24h' generically.
+                volume_24h = latest_candle.get('volume', latest_candle.get('vol')) # Try 'volume' then 'vol'
+
+                with market_data_lock:
+                    market_data['high_24h'] = float(high_24h) if high_24h is not None else 'N/A'
+                    market_data['low_24h'] = float(low_24h) if low_24h is not None else 'N/A'
+                    market_data['volume_24h'] = float(volume_24h) if volume_24h is not None else 'N/A'
+                logging.info(f"Updated 24h data: High={market_data['high_24h']}, Low={market_data['low_24h']}, Volume={market_data['volume_24h']}")
+            else:
+                logging.warning(f"Received candle data is not in expected dict format: {latest_candle}")
+        else:
+            logging.warning("Received 'candles' message but no candle data found.")
+        # No explicit 'forget' is needed for one-time requests like ticks_history with count=1.
+
 def on_error_for_deriv(ws, error):
     """Called when a WebSocket error occurs."""
     logging.error(f"[Deriv WS] Error: {error}")
@@ -407,18 +515,8 @@ def start_deriv_ws(token=None):
     
     # Clear market data on restart
     with market_data_lock:
-        # Re-initialize the entire market_data structure to its default state
-        market_data.clear() # Clear existing content first
-        default_market_data = {
-            'timestamps': [], 'prices': [], 'volumes': [],
-            'rsi': [], 'macd': [], 'bollinger_upper': [], 'bollinger_middle': [],
-            'bollinger_lower': [], 'stochastic': [], 'cci_20': [],
-            'sma_10': [], 'sma_20': [], 'sma_30': [], 'sma_50': [], 'sma_100': [], 'sma_200': [],
-            'ema_10': [], 'ema_20': [], 'ema_30': [], 'ema_50': [], 'ema_100': [], 'ema_200': [],
-            'rsi_signal': 'N/A', 'stochastic_signal': 'N/A', 'macd_signal': 'N/A',
-            'cci_20_signal': 'N/A', 'price_ema_50_signal': 'N/A',
-        }
-        market_data.update(default_market_data)
+        market_data.clear()
+        market_data.update(copy.deepcopy(DEFAULT_MARKET_DATA))
         logging.info(f"[Deriv WS] Market data cleared and re-initialized for symbol {SYMBOL}.")
 
     global current_tick_subscription_id
@@ -567,16 +665,7 @@ def set_symbol():
         with market_data_lock:
             logging.info(f"[/api/set_symbol] WebSocket not connected. Clearing market data for new symbol {SYMBOL} locally.")
             market_data.clear()
-            default_market_data = {
-                'timestamps': [], 'prices': [], 'volumes': [],
-                'rsi': [], 'macd': [], 'bollinger_upper': [], 'bollinger_middle': [],
-                'bollinger_lower': [], 'stochastic': [], 'cci_20': [],
-                'sma_10': [], 'sma_20': [], 'sma_30': [], 'sma_50': [], 'sma_100': [], 'sma_200': [],
-                'ema_10': [], 'ema_20': [], 'ema_30': [], 'ema_50': [], 'ema_100': [], 'ema_200': [],
-                'rsi_signal': 'N/A', 'stochastic_signal': 'N/A', 'macd_signal': 'N/A',
-                'cci_20_signal': 'N/A', 'price_ema_50_signal': 'N/A',
-            }
-            market_data.update(default_market_data)
+            market_data.update(copy.deepcopy(DEFAULT_MARKET_DATA))
             logging.info(f"[/api/set_symbol] Market data cleared and re-initialized locally.")
 
     # Handle WebSocket Re-subscription
