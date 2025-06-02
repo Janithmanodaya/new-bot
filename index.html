@@ -611,152 +611,214 @@
     <script>
         // Fetch data from Flask API and update charts
         async function fetchMarketData() {
-            const response = await fetch('http://127.0.0.1:5000/api/market_data');
-            return await response.json();
+            try {
+                const response = await fetch('http://127.0.0.1:5000/api/market_data');
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    console.error('Data fetch error:', response.status, errorText);
+                    setStatus('Data Fetch Error', 'var(--danger)'); // Assuming setStatus is globally available or passed
+                    throw new Error(`Failed to fetch market data: ${response.status} ${errorText}`);
+                }
+                return await response.json();
+            } catch (e) {
+                console.error('FetchMarketData caught exception:', e.message);
+                // Ensure setStatus is called even for network errors caught by try-catch
+                if (typeof setStatus === 'function') { // Check if setStatus is defined
+                    setStatus('Data Fetch Error', 'var(--danger)');
+                }
+                throw e; // Re-throw so pollMarketData can catch it
+            }
         }
 
         function updateCharts(data) {
+            if (!data || typeof data !== 'object') {
+                console.error('UpdateCharts: Invalid or missing data object');
+                // Optionally display a message on charts: e.g., by clearing them or showing "No data"
+                // Example: document.getElementById('priceChart').parentElement.innerHTML = '<p style="color:var(--danger);">Chart data unavailable.</p>';
+                return;
+            }
+
+            const requiredArrays = ['timestamps', 'prices', 'rsi', 'macd', 'bollinger_upper', 'bollinger_middle', 'bollinger_lower', 'stochastic', 'volumes'];
+            for (const key of requiredArrays) {
+                if (!data[key] || !Array.isArray(data[key])) {
+                    console.error(`UpdateCharts: Missing or invalid data array for '${key}' in data:`, data);
+                    // Potentially clear the specific chart or show "Data unavailable" on it
+                    // For now, we'll let it try to render and fail per chart if specific data is bad,
+                    // but this check prevents total failure if a key is missing entirely.
+                    // Individual chart try-catch blocks will handle rendering errors.
+                    // You might want to return here or handle this more gracefully.
+                    // For example, clear all charts or show a general "incomplete data" message.
+                    // If a chart expects data[key] and it's not an array, it will likely error in its try-catch.
+                }
+            }
+
             // Update all charts with real data from API
             // Price Chart
-            const priceCtx = document.getElementById('priceChart').getContext('2d');
-            if (window.priceChartInstance) window.priceChartInstance.destroy();
-            window.priceChartInstance = new Chart(priceCtx, {
-                type: 'line',
-                data: {
-                    labels: data.timestamps,
-                    datasets: [{
-                        label: 'USD/JPY',
-                        data: data.prices,
-                        borderColor: '#3b82f6',
-                        backgroundColor: 'rgba(59, 130, 246, 0.1)',
-                        borderWidth: 2,
-                        fill: true,
-                        tension: 0.3,
-                        pointRadius: 0
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: {
-                        x: { type: 'time', time: { unit: 'minute' }, grid: { display: false } },
-                        y: { grid: { color: 'rgba(255, 255, 255, 0.05)' } }
+            try {
+                const priceCtx = document.getElementById('priceChart').getContext('2d');
+                if (window.priceChartInstance) window.priceChartInstance.destroy();
+                window.priceChartInstance = new Chart(priceCtx, {
+                    type: 'line',
+                    data: {
+                        labels: data.timestamps,
+                        datasets: [{
+                            label: 'USD/JPY',
+                            data: data.prices,
+                            borderColor: '#3b82f6',
+                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                            borderWidth: 2,
+                            fill: true,
+                            tension: 0.3,
+                            pointRadius: 0
+                        }]
                     },
-                    plugins: { legend: { display: false } }
-                }
-            });
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            x: { type: 'time', time: { unit: 'minute' }, grid: { display: false } },
+                            y: { grid: { color: 'rgba(255, 255, 255, 0.05)' } }
+                        },
+                        plugins: { legend: { display: false } }
+                    }
+                });
+            } catch (e) {
+                console.error("Error rendering Price Chart:", e);
+                // Optionally display a message on the chart area
+                // document.getElementById('priceChart').parentElement.innerHTML = '<p style="color:var(--danger); text-align:center; padding-top: 50px;">Price chart data unavailable.</p>';
+            }
 
             // RSI Chart
-            const rsiCtx = document.getElementById('rsiChart').getContext('2d');
-            if (window.rsiChartInstance) window.rsiChartInstance.destroy();
-            window.rsiChartInstance = new Chart(rsiCtx, {
-                type: 'line',
-                data: {
-                    labels: data.timestamps,
-                    datasets: [{
-                        data: data.rsi,
-                        borderColor: '#22c55e',
-                        borderWidth: 2,
-                        tension: 0.3,
-                        pointRadius: 0
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: {
-                        x: { display: false },
-                        y: { display: true, min: 0, max: 100, grid: { display: false }, ticks: { display: false } }
+            try {
+                const rsiCtx = document.getElementById('rsiChart').getContext('2d');
+                if (window.rsiChartInstance) window.rsiChartInstance.destroy();
+                window.rsiChartInstance = new Chart(rsiCtx, {
+                    type: 'line',
+                    data: {
+                        labels: data.timestamps,
+                        datasets: [{
+                            data: data.rsi,
+                            borderColor: '#22c55e',
+                            borderWidth: 2,
+                            tension: 0.3,
+                            pointRadius: 0
+                        }]
                     },
-                    plugins: { legend: { display: false } }
-                }
-            });
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            x: { display: false },
+                            y: { display: true, min: 0, max: 100, grid: { display: false }, ticks: { display: false } }
+                        },
+                        plugins: { legend: { display: false } }
+                    }
+                });
+            } catch (e) {
+                console.error("Error rendering RSI Chart:", e);
+            }
 
             // MACD Chart
-            const macdCtx = document.getElementById('macdChart').getContext('2d');
-            if (window.macdChartInstance) window.macdChartInstance.destroy();
-            window.macdChartInstance = new Chart(macdCtx, {
-                type: 'bar',
-                data: {
-                    labels: data.timestamps,
-                    datasets: [{
-                        data: data.macd,
-                        backgroundColor: data.macd.map(val => val >= 0 ? 'rgba(34, 197, 94, 0.7)' : 'rgba(239, 68, 68, 0.7)'),
-                        borderWidth: 0
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: { x: { display: false }, y: { display: false } },
-                    plugins: { legend: { display: false } }
-                }
-            });
+            try {
+                const macdCtx = document.getElementById('macdChart').getContext('2d');
+                if (window.macdChartInstance) window.macdChartInstance.destroy();
+                window.macdChartInstance = new Chart(macdCtx, {
+                    type: 'bar',
+                    data: {
+                        labels: data.timestamps,
+                        datasets: [{
+                            data: data.macd,
+                            backgroundColor: data.macd.map(val => val >= 0 ? 'rgba(34, 197, 94, 0.7)' : 'rgba(239, 68, 68, 0.7)'),
+                            borderWidth: 0
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: { x: { display: false }, y: { display: false } },
+                        plugins: { legend: { display: false } }
+                    }
+                });
+            } catch (e) {
+                console.error("Error rendering MACD Chart:", e);
+            }
 
             // Bollinger Bands Chart
-            const bollingerCtx = document.getElementById('bollingerChart').getContext('2d');
-            if (window.bollingerChartInstance) window.bollingerChartInstance.destroy();
-            window.bollingerChartInstance = new Chart(bollingerCtx, {
-                type: 'line',
-                data: {
-                    labels: data.timestamps,
-                    datasets: [
-                        { data: data.bollinger_upper, borderColor: 'rgba(239, 68, 68, 0.7)', borderWidth: 1, pointRadius: 0 },
-                        { data: data.bollinger_middle, borderColor: '#94a3b8', borderWidth: 1, pointRadius: 0 },
-                        { data: data.bollinger_lower, borderColor: 'rgba(34, 197, 94, 0.7)', borderWidth: 1, pointRadius: 0 }
-                    ]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: { x: { display: false }, y: { display: false } },
-                    plugins: { legend: { display: false } }
-                }
-            });
+            try {
+                const bollingerCtx = document.getElementById('bollingerChart').getContext('2d');
+                if (window.bollingerChartInstance) window.bollingerChartInstance.destroy();
+                window.bollingerChartInstance = new Chart(bollingerCtx, {
+                    type: 'line',
+                    data: {
+                        labels: data.timestamps,
+                        datasets: [
+                            { data: data.bollinger_upper, borderColor: 'rgba(239, 68, 68, 0.7)', borderWidth: 1, pointRadius: 0 },
+                            { data: data.bollinger_middle, borderColor: '#94a3b8', borderWidth: 1, pointRadius: 0 },
+                            { data: data.bollinger_lower, borderColor: 'rgba(34, 197, 94, 0.7)', borderWidth: 1, pointRadius: 0 }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: { x: { display: false }, y: { display: false } },
+                        plugins: { legend: { display: false } }
+                    }
+                });
+            } catch (e) {
+                console.error("Error rendering Bollinger Bands Chart:", e);
+            }
 
             // Volume Chart
-            const volumeCtx = document.getElementById('volumeChart').getContext('2d');
-            if (window.volumeChartInstance) window.volumeChartInstance.destroy();
-            window.volumeChartInstance = new Chart(volumeCtx, {
-                type: 'bar',
-                data: {
-                    labels: data.timestamps,
-                    datasets: [{
-                        data: data.volumes,
-                        backgroundColor: 'rgba(59, 130, 246, 0.7)',
-                        borderWidth: 0
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: { x: { display: false }, y: { display: false } },
-                    plugins: { legend: { display: false } }
-                }
-            });
+            try {
+                const volumeCtx = document.getElementById('volumeChart').getContext('2d');
+                if (window.volumeChartInstance) window.volumeChartInstance.destroy();
+                window.volumeChartInstance = new Chart(volumeCtx, {
+                    type: 'bar',
+                    data: {
+                        labels: data.timestamps,
+                        datasets: [{
+                            data: data.volumes,
+                            backgroundColor: 'rgba(59, 130, 246, 0.7)',
+                            borderWidth: 0
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: { x: { display: false }, y: { display: false } },
+                        plugins: { legend: { display: false } }
+                    }
+                });
+            } catch (e) {
+                console.error("Error rendering Volume Chart:", e);
+            }
 
             // Stochastic Chart
-            const stochasticCtx = document.getElementById('stochasticChart').getContext('2d');
-            if (window.stochasticChartInstance) window.stochasticChartInstance.destroy();
-            window.stochasticChartInstance = new Chart(stochasticCtx, {
-                type: 'line',
-                data: {
-                    labels: data.timestamps,
-                    datasets: [{
-                        data: data.stochastic,
-                        borderColor: '#f59e0b',
-                        borderWidth: 2,
-                        tension: 0.3,
-                        pointRadius: 0
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: { x: { display: false }, y: { min: 0, max: 100, display: false } },
-                    plugins: { legend: { display: false } }
-                }
-            });
+            try {
+                const stochasticCtx = document.getElementById('stochasticChart').getContext('2d');
+                if (window.stochasticChartInstance) window.stochasticChartInstance.destroy();
+                window.stochasticChartInstance = new Chart(stochasticCtx, {
+                    type: 'line',
+                    data: {
+                        labels: data.timestamps,
+                        datasets: [{
+                            data: data.stochastic,
+                            borderColor: '#f59e0b',
+                            borderWidth: 2,
+                            tension: 0.3,
+                            pointRadius: 0
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: { x: { display: false }, y: { min: 0, max: 100, display: false } },
+                        plugins: { legend: { display: false } }
+                    }
+                });
+            } catch (e) {
+                console.error("Error rendering Stochastic Chart:", e);
+            }
         }
 
         document.addEventListener('DOMContentLoaded', async function() {
@@ -765,41 +827,125 @@
             connectionStatus.id = 'connectionStatus';
             connectionStatus.style.marginLeft = '12px';
             connectionStatus.style.fontWeight = 'bold';
-            connectionStatus.style.fontSize = '15px';
-            connectionStatus.style.verticalAlign = 'middle';
-            document.getElementById('connectBtn').parentNode.appendChild(connectionStatus);
+            connectionStatus.style.fontSize = '15px'; // Maintained style
+            connectionStatus.style.verticalAlign = 'middle'; // Maintained style
+            // Ensure connectBtn is defined before trying to access its parentNode
+            const connectBtn = document.getElementById('connectBtn');
+            if (connectBtn) {
+                 connectBtn.parentNode.appendChild(connectionStatus);
+            }
+
 
             function setStatus(text, color) {
                 connectionStatus.textContent = text;
-                connectionStatus.style.color = color;
+                connectionStatus.style.color = color; // Use CSS variables for colors
             }
+
+            // Initial state
+            setStatus("Disconnected", "var(--gray)");
+            // const connectBtn = document.getElementById('connectBtn'); // Already defined above
+            if (connectBtn) {
+                connectBtn.innerHTML = '<i class="fas fa-plug"></i> Connect to API';
+                connectBtn.style.background = 'var(--primary)';
+                connectBtn.disabled = false; // Ensure button is enabled initially
+            }
+
 
             // Poll the Python backend for real market data every 2 seconds
             let polling = true;
+            let pollTimeoutId = null;
             async function pollMarketData() {
                 if (!polling) return;
                 try {
-                    const data = await fetchMarketData();
-                    updateCharts(data);
-                    document.querySelector('.price-display').textContent = data.prices.length ? data.prices[data.prices.length-1].toFixed(2) : '--';
+                    const data = await fetchMarketData(); // This now re-throws errors
+                    if (data && data.prices && data.prices.length > 0) {
+                       updateCharts(data);
+                       document.querySelector('.price-display').textContent = data.prices[data.prices.length-1].toFixed(2);
+                       // If data is successfully fetched and charts updated, imply connection is fine for data.
+                       // Status might be "Connected" from connect API, or if it was "Data Error", can clear it.
+                       if (connectionStatus.textContent.includes("Data") || connectionStatus.textContent.includes("No Data")) {
+                           // Assuming if connectBtn says "Connected", we are good.
+                           if(connectBtn && connectBtn.textContent.includes("Connected")) {
+                               setStatus('Connected', 'var(--success)');
+                           } else if (connectBtn && connectBtn.textContent.includes("Connect to API")){ // if we are not connected, show neutral
+                                setStatus('Disconnected', 'var(--gray)');
+                           } else {
+                               setStatus('Data Available', 'var(--gray)');
+                           }
+                       }
+                    } else {
+                         // This case might occur if backend returns empty data but not an error
+                        document.querySelector('.price-display').textContent = '--';
+                        if(connectBtn && connectBtn.textContent.includes("Connected")) { // Only show "No Data" if we expect to be connected
+                            setStatus('No Data', 'var(--warning)');
+                        }
+                    }
                 } catch (e) {
-                    setStatus('No Data', '#ef4444');
+                    // fetchMarketData already sets "Data Fetch Error", so this is redundant unless it's a different error.
+                    console.error("Error in pollMarketData:", e.message);
+                    document.querySelector('.price-display').textContent = 'Error';
+                     // If polling fails, and we thought we were connected, update status.
+                    if (connectBtn && connectBtn.textContent.includes("Connected")) {
+                         setStatus('Data Error', 'var(--danger)');
+                    }
                 }
-                setTimeout(pollMarketData, 2000);
+                if (polling) { // Check again in case polling was stopped during await
+                   pollTimeoutId = setTimeout(pollMarketData, 2000);
+                }
             }
-            pollMarketData();
+            pollMarketData(); // Start polling
 
-            // Connect button functionality
-            document.getElementById('connectBtn').addEventListener('click', function() {
+            // Settings modal elements
+            const settingsModal = document.getElementById('settingsModal');
+            const settingsCogBtn = document.querySelector('.btn-outline'); // The actual settings button with cog icon
+            const closeSettingsBtn = document.getElementById('closeSettings');
+            const saveAndConnectBtn = document.getElementById('saveSettingsBtn'); // This button saves and attempts connection
+            const derivApiTokenInput = document.getElementById('derivApiToken');
+            const settingsSavedMsg = document.getElementById('settingsSavedMsg');
+
+            function openSettingsModal() {
                 derivApiTokenInput.value = localStorage.getItem('derivApiToken') || '';
                 settingsModal.style.display = 'flex';
-                settingsSavedMsg.style.display = 'none';
-                saveSettingsBtn.onclick = async function() {
+                settingsSavedMsg.style.display = 'none'; // Reset message
+            }
+
+            // Event listener for the "Connect to API" button (main button, not cog)
+            if (connectBtn) {
+                connectBtn.addEventListener('click', function() {
+                    // If already connected, clicking it could show settings or disconnect.
+                    // For now, it will always open settings modal to change token or re-connect.
+                    openSettingsModal();
+                });
+            }
+
+            // Event listener for the actual "Settings" cog button
+            if (settingsCogBtn) {
+                settingsCogBtn.addEventListener('click', openSettingsModal);
+            }
+
+            // Close settings modal
+            if (closeSettingsBtn) {
+                closeSettingsBtn.addEventListener('click', function() {
+                    settingsModal.style.display = 'none';
+                });
+            }
+
+            // Handle "Save" button in Settings Modal (which also connects)
+            if (saveAndConnectBtn) {
+                saveAndConnectBtn.addEventListener('click', async function() {
                     const token = derivApiTokenInput.value.trim();
-                    localStorage.setItem('derivApiToken', token);
-                    settingsSavedMsg.style.display = 'block';
-                    setStatus('Connecting...', '#f59e0b');
-                    // POST token to backend to start Deriv connection
+                    localStorage.setItem('derivApiToken', token); // Save token locally
+
+                    settingsSavedMsg.style.display = 'block'; // Show "Saved!" message
+                    setTimeout(() => { settingsSavedMsg.style.display = 'none';}, 2000); // Hide after 2s regardless of connection outcome
+
+                    setStatus('Connecting...', 'var(--warning)');
+                    if (connectBtn) {
+                        connectBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Connecting...';
+                        connectBtn.style.background = 'var(--warning)';
+                        connectBtn.disabled = true;
+                    }
+
                     try {
                         const resp = await fetch('http://127.0.0.1:5000/api/connect', {
                             method: 'POST',
@@ -807,48 +953,45 @@
                             body: JSON.stringify({ token })
                         });
                         const result = await resp.json();
-                        if (result.status === 'started') {
-                            setStatus('Connected', '#22c55e');
-                            document.getElementById('connectBtn').innerHTML = '<i class="fas fa-check"></i> Connected';
-                            document.getElementById('connectBtn').style.background = 'var(--success)';
-                            setTimeout(()=>{ settingsModal.style.display = 'none'; }, 1000);
+
+                        if (resp.ok && result.status === 'started') {
+                            setStatus('Connected', 'var(--success)');
+                            if (connectBtn) {
+                                connectBtn.innerHTML = '<i class="fas fa-check"></i> Connected';
+                                connectBtn.style.background = 'var(--success)';
+                            }
+                            // Close modal on successful connection after a short delay for "Saved!" msg
+                            setTimeout(() => { if (settingsModal) settingsModal.style.display = 'none'; }, 1000);
                         } else {
-                            setStatus('Failed', '#ef4444');
+                            const errorMsg = result.error || `Connection failed (status ${resp.status}). Check token or backend.`;
+                            setStatus(errorMsg, 'var(--danger)');
+                            if (connectBtn) {
+                                connectBtn.innerHTML = '<i class="fas fa-plug"></i> Connect to API';
+                                connectBtn.style.background = 'var(--primary)';
+                            }
+                            alert(`Connection Failed: ${errorMsg}`); // Show error in alert
                         }
                     } catch (e) {
-                        setStatus('Failed', '#ef4444');
-                        alert('Failed to connect to backend.');
+                        console.error('Failed to connect to backend API:', e);
+                        setStatus('Connection Error (Backend)', 'var(--danger)');
+                        if (connectBtn) {
+                            connectBtn.innerHTML = '<i class="fas fa-plug"></i> Connect to API';
+                            connectBtn.style.background = 'var(--primary)';
+                        }
+                        alert('Failed to connect to backend. Is the server running and accessible?');
+                    } finally {
+                        if (connectBtn) {
+                            connectBtn.disabled = false;
+                        }
                     }
-                };
-            });
+                });
+            }
         });
         
-        // Settings modal logic
-        const settingsModal = document.getElementById('settingsModal');
-        const settingsBtn = document.querySelector('.btn-outline');
-        const closeSettings = document.getElementById('closeSettings');
-        const saveSettingsBtn = document.getElementById('saveSettingsBtn');
-        const derivApiTokenInput = document.getElementById('derivApiToken');
-        const settingsSavedMsg = document.getElementById('settingsSavedMsg');
-
-        // Open modal
-        settingsBtn.addEventListener('click', function() {
-            derivApiTokenInput.value = localStorage.getItem('derivApiToken') || '';
-            settingsModal.style.display = 'flex';
-            settingsSavedMsg.style.display = 'none';
-        });
-        // Close modal
-        closeSettings.addEventListener('click', function() {
-            settingsModal.style.display = 'none';
-        });
-        // Save token
-        saveSettingsBtn.addEventListener('click', function() {
-            localStorage.setItem('derivApiToken', derivApiTokenInput.value.trim());
-            settingsSavedMsg.style.display = 'block';
-            setTimeout(()=>{ settingsModal.style.display = 'none'; }, 1000);
-        });
-        // Utility to get token
-        function getDerivApiToken() {
+        // The old, separate saveSettingsBtn listener is removed as its functionality
+        // is now part of the saveAndConnectBtn logic triggered from connectBtn flow.
+        // Utility to get token (can be removed if not used elsewhere)
+        // function getDerivApiToken() {
             return localStorage.getItem('derivApiToken') || '';
         }
     </script>
