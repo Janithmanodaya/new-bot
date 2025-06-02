@@ -123,6 +123,7 @@ ws_app = None
 # Enhanced WebSocket Handlers
 def on_open_for_deriv(ws):
     """Called when the WebSocket connection is established."""
+    logging.info(f"WebSocket connection opened. Attempting to subscribe to ticks for SYMBOL: {SYMBOL} or authorize.")
     if API_TOKEN:
         logging.info(f"[Deriv WS] Connection opened. API_TOKEN is present. Attempting to authorize.")
         ws.send(json.dumps({"authorize": API_TOKEN}))
@@ -156,16 +157,20 @@ def on_message_for_deriv(ws, message):
             ws.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
 
     elif msg_type == 'subscribe': # Handle subscription confirmation
+        logging.info(f"Full 'subscribe' response: {message}")
         if data.get('error'):
-            logging.error(f"[Deriv WS] Subscription failed: {data['error']['message']}")
+            logging.error(f"Error in 'subscribe' response: {data['error']}")
         else:
             subscription = data.get('subscription')
             if subscription and subscription.get('id'):
                 current_tick_subscription_id = subscription['id']
-                logging.info(f"[Deriv WS] Successfully subscribed to ticks. Subscription ID: {current_tick_subscription_id}")
+                # This specific logging for ID is still useful alongside full message
+                logging.info(f"[Deriv WS] Successfully subscribed with ID: {current_tick_subscription_id}")
             else:
-                logging.warning(f"[Deriv WS] Received subscription confirmation, but no ID found: {data}")
+                logging.warning(f"[Deriv WS] Received subscription confirmation, but no ID found in data: {data}")
 
+    elif msg_type == 'forget':
+        logging.info(f"Full 'forget' response: {message}")
 
     elif msg_type == 'tick':
         tick = data.get('tick')
@@ -237,11 +242,11 @@ def on_message_for_deriv(ws, message):
         else:
             logging.info(f"[Deriv WS] Proposal successful: {data.get('proposal_open_contract')}")
             
-    elif data.get('error'):
-        logging.error(f"[Deriv WS] Received error: {data['error']['message']} (Code: {data['error'].get('code')})")
+    elif data.get('error'): # This is a general error catcher for messages that have an 'error' field
+        logging.error(f"Deriv API Error received: {data['error']}. Full message: {message}")
         
     # else:
-        # logging.info(f"[Deriv WS] Received unhandled message type: {msg_type}")
+        # logging.info(f"[Deriv WS] Received unhandled message type: {msg_type}. Full message: {message}")
 
 def on_error_for_deriv(ws, error):
     """Called when a WebSocket error occurs."""
@@ -249,7 +254,7 @@ def on_error_for_deriv(ws, error):
 
 def on_close_for_deriv(ws, close_status_code, close_msg):
     """Called when the WebSocket connection is closed."""
-    logging.warning(f"[Deriv WS] Connection closed. Status: {close_status_code}, Msg: {close_msg}")
+    logging.warning(f"WebSocket connection closed. Status: {close_status_code}, Message: {close_msg}. Current SYMBOL: {SYMBOL}")
 
 def start_deriv_ws(token=None):
     global ws_thread, ws_app, API_TOKEN, market_data
@@ -327,7 +332,7 @@ def check_deriv_token(token):
                 logging.info("[Token Check] Token validation successful.")
             else:
                 result['error'] = data['error']['message']
-                logging.error(f"[Token Check] Token validation failed: {result['error']}")
+                logging.error(f"Token validation error: {data['error']}") # Enhanced logging
             ws_check.close()
             done.set()
         elif data.get('error'): # General error not specific to authorize msg_type
@@ -420,18 +425,10 @@ def set_symbol():
 
     # Handle WebSocket Re-subscription
     if ws_app and ws_app.sock and ws_app.sock.connected:
-        logging.info(f"[/api/set_symbol] WebSocket is connected. Attempting to re-subscribe for {SYMBOL}.")
-        if current_tick_subscription_id:
-            logging.info(f"[/api/set_symbol] Unsubscribing from old ticks (ID: {current_tick_subscription_id}).")
-            try:
-                ws_app.send(json.dumps({"forget": current_tick_subscription_id}))
-            except Exception as e:
-                logging.error(f"[/api/set_symbol] Error sending forget request: {e}")
-            current_tick_subscription_id = None # Reset whether forget succeeded or not
-
-        # Restart WebSocket to subscribe to the new symbol
-        # start_deriv_ws will close the existing connection and open a new one using the new SYMBOL
-        logging.info(f"[/api/set_symbol] Restarting WebSocket connection for new symbol {SYMBOL}.")
+        # No explicit "forget" needed here. start_deriv_ws will close the old connection,
+        # which implicitly ends old subscriptions. The new connection will subscribe to the new SYMBOL.
+        logging.info(f"[/api/set_symbol] WebSocket is connected. Restarting connection for new symbol: {SYMBOL}.")
+        logging.info(f"Calling start_deriv_ws to restart WebSocket for new symbol: {SYMBOL}")
         start_deriv_ws(API_TOKEN) # Pass current token to maintain auth if present
     else:
         logging.info(f"[/api/set_symbol] WebSocket not connected. New symbol {SYMBOL} will be used on next connection.")
