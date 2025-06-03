@@ -24,6 +24,15 @@
             --border: rgba(255, 255, 255, 0.1);
         }
         
+        .strategy-list-item {
+            /* display: flex; flex-direction: column; */
+            /* margin-bottom: 10px; */ /* Gap is handled by flex container now */
+        }
+        .strategy-list-item h5 { /* Ensure consistent margin for the title */
+            margin-top: 0;
+            margin-bottom: 8px;
+        }
+        
         * {
             margin: 0;
             padding: 0;
@@ -555,6 +564,22 @@
                         </tbody>
                     </table>
                 </div>
+
+                <!-- Live Strategies Panel START -->
+                <div id="liveStrategiesPanel" class="indicator-card" style="margin-top: 20px; padding: 20px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                        <h2 style="font-size: 18px; font-weight: 600; color: var(--light);">My Strategies</h2>
+                        <button class="btn btn-sm" id="openStrategyModalBtn">
+                            <i class="fas fa-plus"></i> Add New Strategy
+                        </button>
+                    </div>
+                    <div id="liveStrategiesListContainer" style="display: flex; flex-direction: column; gap: 15px;">
+                        <!-- Strategies will be loaded here by JavaScript -->
+                        <!-- Placeholder message if no strategies -->
+                        <p style="color: var(--gray); text-align: center;">Loading strategies...</p>
+                    </div>
+                </div>
+                <!-- Live Strategies Panel END -->
             </div>
             
             <div class="sidebar">
@@ -660,6 +685,63 @@
             </div>
         </div>
     </div>
+
+   <!-- Strategy Create/Edit Modal (Initially Hidden) -->
+   <div id="strategyEditModal" style="display:none; position:fixed; top:0; left:0; width:100vw; height:100vh; background:rgba(15,23,42,0.85); z-index:1000; align-items:center; justify-content:center; padding:20px;">
+       <div style="background:var(--secondary); border-radius:16px; padding:25px 30px; width:100%; max-width:600px; box-shadow:0 8px 32px rgba(0,0,0,0.3); border:1px solid var(--border); position:relative; max-height: 90vh; overflow-y: auto;">
+           <button id="closeStrategyEditModalBtn" style="position:absolute; top:15px; right:15px; background:none; border:none; color:var(--gray); font-size:24px; cursor:pointer; line-height: 1;">&times;</button>
+           <h2 id="strategyModalTitle" style="margin-bottom:25px; font-size:22px; color:var(--light); text-align:left;">Create New Strategy</h2>
+
+           <!-- Form content reused from strategyBuilderView design -->
+           <input type="hidden" id="strategyModalIdInput" value="">
+
+           <div class="form-group" style="margin-bottom:18px;">
+               <label for="strategyModalNameInput" style="display:block; margin-bottom:7px; font-weight:500; font-size:0.9em;">Strategy Name</label>
+               <input type="text" id="strategyModalNameInput" placeholder="e.g., 'RSI Buy Signal'" style="width:100%; padding:10px 12px; border-radius:8px; border:1px solid var(--border); background:var(--dark); color:var(--light); font-size:0.95em;">
+           </div>
+
+           <div class="form-group" style="margin-bottom:18px;">
+               <label for="strategyModalDescriptionInput" style="display:block; margin-bottom:7px; font-weight:500; font-size:0.9em;">Description</label>
+               <textarea id="strategyModalDescriptionInput" placeholder="Describe the strategy's logic and purpose" style="width:100%; padding:10px 12px; border-radius:8px; border:1px solid var(--border); background:var(--dark); color:var(--light); min-height:70px; font-size:0.95em;"></textarea>
+           </div>
+
+           <div class="form-group" style="margin-bottom:18px; display:flex; align-items:center;">
+               <input type="checkbox" id="strategyModalIsActiveInput" style="margin-right:10px; width:17px; height:17px; accent-color: var(--primary);">
+               <label for="strategyModalIsActiveInput" style="font-weight:500; font-size:0.9em; margin-bottom:0;">Strategy is Active</label>
+           </div>
+
+           <fieldset style="border:1px solid var(--border); border-radius:8px; padding:12px 15px; margin-bottom:18px;">
+               <legend style="padding:0 8px; font-weight:500; color:var(--gray); font-size:0.85em;">Condition (Single)</legend>
+               <div id="strategyModalConditionsContainer" class="condition-item" style="display:flex; gap:10px; align-items:center;">
+                   <select id="strategyModalConditionIndicator" class="condition-indicator" style="padding:8px; border-radius:6px; background:var(--dark); color:var(--light); border:1px solid var(--border); flex:1;">
+                       <option value="RSI">RSI</option> <option value="MACD">MACD</option> <option value="STOCH">Stochastic</option> <option value="PRICE">Price</option>
+                       <option value="EMA10">EMA10</option> <option value="EMA20">EMA20</option> <option value="EMA30">EMA30</option> <option value="EMA50">EMA50</option> <option value="EMA100">EMA100</option> <option value="EMA200">EMA200</option>
+                       <option value="CCI">CCI</option> 
+                   </select>
+                   <select id="strategyModalConditionOperator" class="condition-operator" style="padding:8px; border-radius:6px; background:var(--dark); color:var(--light); border:1px solid var(--border); flex:1;">
+                       <option value="<">&lt;</option> <option value="<=">&lt;=</option> <option value="==">==</option> <option value=">=">&gt;=</option> <option value=">">&gt;</option>
+                       <option value="CROSS_ABOVE">Crosses Above</option> <option value="CROSS_BELOW">Crosses Below</option>
+                   </select>
+                   <input type="text" id="strategyModalConditionValue" class="condition-value" placeholder="Value" style="padding:8px; border-radius:6px; background:var(--dark); color:var(--light); border:1px solid var(--border); flex:1;">
+               </div>
+           </fieldset>
+           
+           <fieldset style="border:1px solid var(--border); border-radius:8px; padding:12px 15px; margin-bottom:25px;">
+               <legend style="padding:0 8px; font-weight:500; color:var(--gray); font-size:0.85em;">Action (Single)</legend>
+               <div id="strategyModalActionsContainer" class="action-item" style="display:flex; gap:10px; align-items:center;">
+                   <select id="strategyModalActionType" class="action-type" style="padding:8px; border-radius:6px; background:var(--dark); color:var(--light); border:1px solid var(--border); flex:1;">
+                       <option value="BUY">BUY</option> <option value="SELL">SELL</option>
+                       <option value="NOTIFY_EMAIL">Notify (Email)</option> <option value="NOTIFY_ALERT">Notify (Alert)</option>
+                   </select>
+                   <input type="text" id="strategyModalActionDetails" class="action-details" placeholder="Action details (e.g., stake, email)" style="padding:8px; border-radius:6px; background:var(--dark); color:var(--light); border:1px solid var(--border); flex:1;">
+               </div>
+           </fieldset>
+           <div style="display:flex; justify-content:flex-end; gap:12px;">
+                <button id="cancelStrategyModalBtn" class="btn btn-outline" type="button"><i class="fas fa-times"></i> Cancel</button>
+                <button id="saveStrategyModalBtn" class="btn" type="button"><i class="fas fa-save"></i> Save Strategy</button>
+           </div>
+       </div>
+   </div>
 
     <script>
         let currentSelectedSymbol = ''; // Global variable for the currently selected symbol
@@ -939,8 +1021,205 @@
         }
 
         document.addEventListener('DOMContentLoaded', async function() {
+            // Modal Elements
+            const strategyEditModal = document.getElementById('strategyEditModal');
+            const strategyModalTitle = document.getElementById('strategyModalTitle');
+            const strategyModalIdInput = document.getElementById('strategyModalIdInput');
+            const strategyModalNameInput = document.getElementById('strategyModalNameInput');
+            const strategyModalDescriptionInput = document.getElementById('strategyModalDescriptionInput');
+            const strategyModalIsActiveInput = document.getElementById('strategyModalIsActiveInput');
+            const strategyModalConditionIndicator = document.getElementById('strategyModalConditionIndicator');
+            const strategyModalConditionOperator = document.getElementById('strategyModalConditionOperator');
+            const strategyModalConditionValue = document.getElementById('strategyModalConditionValue');
+            const strategyModalActionType = document.getElementById('strategyModalActionType');
+            const strategyModalActionDetails = document.getElementById('strategyModalActionDetails');
+            const closeStrategyEditModalBtn = document.getElementById('closeStrategyEditModalBtn'); 
+            const cancelStrategyModalBtn = document.getElementById('cancelStrategyModalBtn'); 
+            const saveStrategyModalBtn = document.getElementById('saveStrategyModalBtn');
+
+            // Panel Button
+            const openStrategyModalBtn = document.getElementById('openStrategyModalBtn'); 
+
+            // Critical Modal Structure Check
+            if (!strategyEditModal || !strategyModalTitle || !strategyModalIdInput || !strategyModalNameInput || 
+                !strategyModalDescriptionInput || !strategyModalIsActiveInput || !strategyModalConditionIndicator || 
+                !strategyModalConditionOperator || !strategyModalConditionValue || !strategyModalActionType || 
+                !strategyModalActionDetails || !closeStrategyEditModalBtn || !cancelStrategyModalBtn || !saveStrategyModalBtn) {
+                console.error("[DEBUG] CRITICAL: One or more strategy modal elements are missing. Modal functionality will be impaired.");
+                // Optionally, disable buttons that would trigger modal operations if critical parts are missing
+                if (openStrategyModalBtn) openStrategyModalBtn.disabled = true;
+                const navHeaderStrategiesBtn = document.getElementById('navStrategiesBtn');
+                if (navHeaderStrategiesBtn) navHeaderStrategiesBtn.disabled = true;
+            }
+
+            function openModal() {
+                if(strategyEditModal) {
+                    strategyEditModal.style.display = 'flex';
+                } else {
+                    console.error("[DEBUG] strategyEditModal element not found, cannot open modal.");
+                }
+            }
+            function closeModal() {
+                if(strategyEditModal) {
+                    strategyEditModal.style.display = 'none';
+                } else {
+                    console.error("[DEBUG] strategyEditModal element not found, cannot close modal.");
+                }
+            }
+
+            if (openStrategyModalBtn) {
+                openStrategyModalBtn.addEventListener('click', function() {
+                    console.log('[DEBUG] openStrategyModalBtn clicked for new strategy.');
+                    // Null checks for modal elements are implicitly covered by the critical check above
+                    // or should be handled by the function if it can proceed partially.
+                    // For this reset operation, if elements are missing, it's part of the critical failure.
+                    if (!strategyModalTitle || !strategyModalIdInput || !strategyModalNameInput || !strategyModalDescriptionInput ||
+                        !strategyModalIsActiveInput || !strategyModalConditionIndicator || !strategyModalConditionOperator ||
+                        !strategyModalConditionValue || !strategyModalActionType || !strategyModalActionDetails) {
+                        console.error("[DEBUG] Cannot reset modal form for new strategy, critical elements missing.");
+                        return;
+                    }
+                    strategyModalTitle.textContent = 'Create New Strategy';
+                    strategyModalIdInput.value = ''; 
+                    strategyModalNameInput.value = '';
+                    strategyModalDescriptionInput.value = '';
+                    strategyModalIsActiveInput.checked = true; 
+                    strategyModalConditionIndicator.selectedIndex = 0;
+                    strategyModalConditionOperator.selectedIndex = 0;
+                    strategyModalConditionValue.value = '';
+                    strategyModalActionType.selectedIndex = 0;
+                    strategyModalActionDetails.value = '';
+                    openModal();
+                });
+            } else {
+                console.warn("[DEBUG] Element with ID 'openStrategyModalBtn' not found. Listener not attached.");
+            }
+            
+            if(closeStrategyEditModalBtn) {
+                closeStrategyEditModalBtn.addEventListener('click', closeModal);
+            } else {
+                console.warn("[DEBUG] Element with ID 'closeStrategyEditModalBtn' not found. Listener not attached.");
+            }
+
+            if(cancelStrategyModalBtn) {
+                cancelStrategyModalBtn.addEventListener('click', closeModal);
+            } else {
+                console.warn("[DEBUG] Element with ID 'cancelStrategyModalBtn' not found. Listener not attached.");
+            }
+
+            if (saveStrategyModalBtn) {
+                saveStrategyModalBtn.addEventListener('click', async function() {
+                    if (!strategyModalIdInput || !strategyModalNameInput || !strategyModalDescriptionInput || 
+                        !strategyModalIsActiveInput || !strategyModalConditionIndicator || !strategyModalConditionOperator || 
+                        !strategyModalConditionValue || !strategyModalActionType || !strategyModalActionDetails) {
+                        console.error("[DEBUG] CRITICAL: One or more modal form elements are missing. Cannot save strategy.");
+                        alert("Error: Strategy form is incomplete. Cannot save.");
+                        return;
+                    }
+
+                    const strategyId = strategyModalIdInput.value;
+                    const strategyName = strategyModalNameInput.value.trim();
+                    
+                    if (!strategyName) {
+                        alert('Strategy Name is required.');
+                        return;
+                    }
+
+                    const conditionsGroup = {
+                        logical_operator: 'AND',
+                        conditions: [{
+                            indicator: strategyModalConditionIndicator.value,
+                            operator: strategyModalConditionOperator.value,
+                            value: strategyModalConditionValue.value.trim()
+                        }]
+                    };
+                    // Ensure condition values are somewhat valid before including, or send empty if not.
+                    if (!strategyModalConditionIndicator.value || !strategyModalConditionOperator.value || !strategyModalConditionValue.value.trim()) {
+                        conditionsGroup.conditions = []; 
+                    }
+
+                    let actions = [{ 
+                        type: strategyModalActionType.value,
+                        details: strategyModalActionDetails.value.trim()
+                    }];
+                    if (!strategyModalActionType.value) { 
+                        actions = []; 
+                    }
+
+                    const strategyPayload = {
+                        strategy_name: strategyName,
+                        description: strategyModalDescriptionInput.value.trim(),
+                        is_active: strategyModalIsActiveInput.checked,
+                        conditions_group: conditionsGroup,
+                        actions: actions
+                    };
+
+                    let url = '/api/strategies';
+                    let method = 'POST';
+                    if (strategyId) { // strategyId is already defined in this scope
+                        url = `/api/strategies/${strategyId}`;
+                        method = 'PUT';
+                    }
+
+                    // Debug logs to be added:
+                    console.log(`[DEBUG] Attempting to save strategy.`);
+                    console.log(`[DEBUG] Strategy ID: '${strategyId}' (blank if new)`);
+                    console.log(`[DEBUG] Method: ${method}`);
+                    console.log(`[DEBUG] URL: ${url}`);
+                    console.log(`[DEBUG] Payload:`, JSON.stringify(strategyPayload, null, 2)); // Pretty print payload
+
+                    try {
+                        const response = await fetch(url, { // This is the existing fetch call
+                            method: method,
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(strategyPayload)
+                        });
+                        if (!response.ok) {
+                            const errorData = await response.json().catch(() => ({ detail: 'Unknown error during save.' }));
+                            throw new Error(`Failed to save strategy: ${response.status} - ${errorData.detail || errorData.error || 'Server error'}`);
+                        }
+                        await response.json(); 
+                        alert('Strategy saved successfully!');
+                        closeModal();
+                        loadAndDisplayCustomStrategies(); 
+                    } catch (error) {
+                        console.error('Error saving strategy from modal:', error);
+                        alert(`Could not save strategy: ${error.message}`);
+                    }
+                });
+            }
+            
+            const navStrategiesBtn = document.getElementById('navStrategiesBtn');
+            const navHeaderStrategiesBtn = document.getElementById('navStrategiesBtn'); // Renamed for clarity from general navStrategiesBtn
+            if (navHeaderStrategiesBtn) {
+                // Assuming previous removeEventListener for 'showView' on 'navStrategiesBtn' was effective or not needed if it wasn't attached.
+                navHeaderStrategiesBtn.addEventListener('click', function() {
+                    console.log('[DEBUG] Header navStrategiesBtn clicked, opening modal for new strategy.');
+                     if (!strategyModalTitle || !strategyModalIdInput || !strategyModalNameInput || !strategyModalDescriptionInput ||
+                        !strategyModalIsActiveInput || !strategyModalConditionIndicator || !strategyModalConditionOperator ||
+                        !strategyModalConditionValue || !strategyModalActionType || !strategyModalActionDetails) {
+                        console.error("[DEBUG] Cannot reset modal form from header button, critical modal elements missing.");
+                        return;
+                    }
+                    strategyModalTitle.textContent = 'Create New Strategy';
+                    strategyModalIdInput.value = '';
+                    strategyModalNameInput.value = '';
+                    strategyModalDescriptionInput.value = '';
+                    strategyModalIsActiveInput.checked = true;
+                    strategyModalConditionIndicator.selectedIndex = 0;
+                    strategyModalConditionOperator.selectedIndex = 0;
+                    strategyModalConditionValue.value = '';
+                    strategyModalActionType.selectedIndex = 0;
+                    strategyModalActionDetails.value = '';
+                    openModal();
+                });
+            } else {
+                console.warn("[DEBUG] Element with ID 'navStrategiesBtn' (header button) not found. Listener not attached.");
+            }
+
             // Register financial chart types
-            if (typeof Chart !== 'undefined' && Chart.FinancialController) { // For chartjs-chart-financial v0.1.x
+            const chartJSLib = typeof Chart !== 'undefined' ? Chart : null; // Check Chart library
+            if (chartJSLib && chartJSLib.FinancialController) { 
                  Chart.register(Chart.FinancialController, Chart.OhlcController, Chart.CandlestickController, Chart.OhlcElement, Chart.CandlestickElement);
                  console.log('Financial chart types registered (v0.1.x style).');
             } else if (typeof Chart !== 'undefined' && Chart.controllers && Chart.controllers.candlestick) { // For chartjs-chart-financial v0.2.x+
@@ -959,43 +1238,56 @@
             connectionStatus.style.fontSize = '15px'; // Maintained style
             connectionStatus.style.verticalAlign = 'middle'; // Maintained style
             // Ensure connectBtn is defined before trying to access its parentNode
-            const connectBtn = document.getElementById('connectBtn');
-            if (connectBtn) {
-                 connectBtn.parentNode.appendChild(connectionStatus);
+            const connectBtnMain = document.getElementById('connectBtn'); // Explicitly named
+            if (connectBtnMain) {
+                 if (connectionStatus) connectBtnMain.parentNode.appendChild(connectionStatus); else console.warn("[DEBUG] connectionStatus span not created, cannot append to connectBtn parent.");
+            } else {
+                console.warn("[DEBUG] Main connectBtn not found. Status indicator not appended.");
             }
 
             const currencySelector = document.getElementById('currencySelector');
-            const chartTitleElement = document.querySelector('.chart-title');
-            // Assuming there's an element for the symbol in market overview, e.g., with id="marketOverviewSymbol"
-            // Let's target the div that contains "USD/JPY • Forex" text.
-            // This is fragile; a more specific ID or class would be better.
-            const marketOverviewSymbolElement = document.querySelector('.market-overview div:nth-child(3)');
-
+            const chartTitleElement = document.querySelector('.chart-title'); // querySelector is fine, less critical if missing
+            const marketOverviewSymbolElement = document.querySelector('.market-overview div:nth-child(3)'); // Also less critical
 
             function setStatus(text, color) {
-                connectionStatus.textContent = text;
-                connectionStatus.style.color = color; // Use CSS variables for colors
+                if (connectionStatus) {
+                    connectionStatus.textContent = text;
+                    connectionStatus.style.color = color; 
+                } else {
+                    console.warn("[DEBUG] setStatus called, but connectionStatus element is null.");
+                }
             }
 
             // Initial state
             setStatus("Disconnected", "var(--gray)");
-            currentSelectedSymbol = currencySelector.value; // Initialize global symbol
+            if (currencySelector) {
+                currentSelectedSymbol = currencySelector.value; 
+            } else {
+                console.warn("[DEBUG] currencySelector not found. Cannot set initial currentSelectedSymbol.");
+                currentSelectedSymbol = "USD/JPY"; // Fallback if selector is missing
+            }
+
             if (chartTitleElement) {
                 chartTitleElement.textContent = `Market Price - ${currentSelectedSymbol}`;
+            } else {
+                console.warn("[DEBUG] chartTitleElement not found. Cannot set initial chart title.");
             }
-            if(marketOverviewSymbolElement) { // Update market overview symbol display
-                marketOverviewSymbolElement.textContent = `${currentSelectedSymbol} • Forex`; // Assuming all are Forex for now
+            if(marketOverviewSymbolElement) { 
+                marketOverviewSymbolElement.textContent = `${currentSelectedSymbol} • Forex`; 
+            } else {
+                console.warn("[DEBUG] marketOverviewSymbolElement not found. Cannot set initial overview symbol.");
             }
 
-            // const connectBtn = document.getElementById('connectBtn'); // Already defined above
-            if (connectBtn) {
-                connectBtn.innerHTML = '<i class="fas fa-plug"></i> Connect to API';
-                connectBtn.style.background = 'var(--primary)';
-                connectBtn.disabled = false; // Ensure button is enabled initially
+            if (connectBtnMain) {
+                connectBtnMain.innerHTML = '<i class="fas fa-plug"></i> Connect to API';
+                connectBtnMain.style.background = 'var(--primary)';
+                connectBtnMain.disabled = false; 
             }
+            // No else for connectBtnMain here as its absence is warned above.
 
             // Event listener for currency selector change
-            currencySelector.addEventListener('change', async function(event) {
+            if (currencySelector) {
+                currencySelector.addEventListener('change', async function(event) {
                 const newSymbolValue = event.target.value;
                 const selectedSymbolText = event.target.options[event.target.selectedIndex].text; // Get the display text
                 const symbolNoteEl = document.getElementById('symbolNote');
@@ -1219,7 +1511,7 @@
             
             // Initialize chart controls and add event listeners
             const chartTypeSelectEl = document.getElementById('chartTypeSelect');
-            const timeframeButtons = document.querySelectorAll('.timeframe-selector .time-btn');
+            const timeframeButtons = document.querySelectorAll('.timeframe-selector .time-btn'); // querySelectorAll is fine, returns empty NodeList if not found
             const emaSelectorEl = document.getElementById('emaSelect');
 
             if (emaSelectorEl) {
@@ -1356,21 +1648,26 @@
 
             // Settings modal elements
             const settingsModal = document.getElementById('settingsModal');
-            const settingsCogBtn = document.getElementById('settingsCogBtn'); // Use new ID
-            const closeSettingsBtn = document.getElementById('closeSettings');
-            const saveAndConnectBtn = document.getElementById('saveSettingsBtn');
+            const settingsCogBtn = document.getElementById('settingsCogBtn'); 
+            const closeSettingsBtn = document.getElementById('closeSettings'); // Corrected: This is for settings modal
+            const saveSettingsBtn = document.getElementById('saveSettingsBtn'); // Corrected: This is for settings modal
             const derivApiTokenInput = document.getElementById('derivApiToken');
             const settingsSavedMsg = document.getElementById('settingsSavedMsg');
 
-            // View Switching Elements
-            const dashboardView = document.getElementById('dashboardView');
-            const strategiesView = document.getElementById('strategiesView'); 
-            const strategyBuilderView = document.getElementById('strategyBuilderView'); // Added
-            const navStrategiesBtn = document.getElementById('navStrategiesBtn');
-            const homeNavLogo = document.getElementById('homeNavLogo');
-            const createNewStrategyBtn = document.getElementById('createNewStrategyBtn'); // Added
+            // Critical Settings Modal Structure Check
+            if (!settingsModal || !settingsCogBtn || !closeSettingsBtn || !saveSettingsBtn || !derivApiTokenInput || !settingsSavedMsg) {
+                console.error("[DEBUG] CRITICAL: One or more settings modal elements are missing. Settings functionality will be impaired.");
+                if(settingsCogBtn) settingsCogBtn.disabled = true; // Example of disabling trigger
+            }
 
-            const mainViews = ['dashboardView', 'strategiesView', 'strategyBuilderView'];
+
+            // View Switching Elements (mostly for initial setup now)
+            const dashboardView = document.getElementById('dashboardView');
+            // navStrategiesBtn is already defined as navHeaderStrategiesBtn
+            const homeNavLogo = document.getElementById('homeNavLogo');
+            // createNewStrategyBtn was for the old view, openStrategyModalBtn for the panel is used.
+
+            const mainViews = ['dashboardView']; // Confirmed
 
             function showView(viewIdToShow) {
                 mainViews.forEach(viewId => {
@@ -1378,20 +1675,14 @@
                     if (viewElement) {
                         viewElement.style.display = (viewId === viewIdToShow) ? 'block' : 'none';
                     } else {
-                        // Warn if the view we intend to show, or a primary alternative view, is missing.
-                        if (viewId === viewIdToShow || viewId === 'strategiesView' || viewId === 'strategyBuilderView') {
-                           console.warn(`View element not found: ${viewId}. Ensure its HTML is in index.html.`);
+                        // Warn if the view we intend to show is missing.
+                        if (viewId === viewIdToShow) { 
+                           console.warn(`[DEBUG] showView: View element not found: ${viewId}. Ensure its HTML is in index.html.`);
                         }
                     }
                 });
-
-                if (viewIdToShow === 'strategiesView' && typeof loadAndDisplayCustomStrategies === 'function') {
-                    loadAndDisplayCustomStrategies();
-                }
-                // Example for future:
-                // if (viewIdToShow === 'strategyBuilderView' && typeof initializeStrategyBuilder === 'function') {
-                //    initializeStrategyBuilder(); 
-                // }
+                // The specific call to loadAndDisplayCustomStrategies for 'strategiesView' is removed,
+                // as 'strategiesView' is no longer a main view and strategies are loaded differently.
             }
 
             function openSettingsModal() {
@@ -1400,42 +1691,45 @@
                 settingsSavedMsg.style.display = 'none'; // Reset message
             }
 
-            // Event listener for the "Connect to API" button (main button, not cog)
-            if (connectBtn) {
-                connectBtn.addEventListener('click', function() {
-                    // If already connected, clicking it could show settings or disconnect.
-                    // For now, it will always open settings modal to change token or re-connect.
+            // Event listener for the main "Connect to API" button (which now opens settings)
+            if (connectBtnMain) { // connectBtnMain was previously connectBtn
+                connectBtnMain.addEventListener('click', function() {
                     openSettingsModal();
                 });
+            } else {
+                console.warn("[DEBUG] Main 'Connect to API' button (connectBtn) not found. Settings modal cannot be opened from it.");
             }
             
-            // Event listener for the actual "Settings" cog button
             if (settingsCogBtn) {
                 settingsCogBtn.addEventListener('click', openSettingsModal);
+            } else {
+                console.warn("[DEBUG] Element with ID 'settingsCogBtn' not found. Listener not attached.");
             }
             
-            // Close settings modal
-            if (closeSettingsBtn) {
+            if (closeSettingsBtn) { // This is for settings modal
                 closeSettingsBtn.addEventListener('click', function() {
-                    settingsModal.style.display = 'none';
+                    if(settingsModal) settingsModal.style.display = 'none'; else console.error("[DEBUG] settingsModal not found on closeSettingsBtn click.");
                 });
+            } else {
+                console.warn("[DEBUG] Element with ID 'closeSettings' (for settings modal) not found. Listener not attached.");
             }
 
-            // Handle "Save" button in Settings Modal (which also connects)
-            if (saveAndConnectBtn) {
-                saveAndConnectBtn.addEventListener('click', async function() {
+            if (saveSettingsBtn) { // This is for settings modal
+                saveSettingsBtn.addEventListener('click', async function() {
+                    if (!derivApiTokenInput || !settingsSavedMsg || !connectBtnMain || !settingsModal) {
+                        console.error("[DEBUG] Critical element(s) for saveSettingsBtn are missing. Aborting save settings.");
+                        return;
+                    }
                     const token = derivApiTokenInput.value.trim();
-                    localStorage.setItem('derivApiToken', token); // Save token locally
+                    localStorage.setItem('derivApiToken', token); 
                     
-                    settingsSavedMsg.style.display = 'block'; // Show "Saved!" message
-                    setTimeout(() => { settingsSavedMsg.style.display = 'none';}, 2000); // Hide after 2s regardless of connection outcome
+                    settingsSavedMsg.style.display = 'block'; 
+                    setTimeout(() => { settingsSavedMsg.style.display = 'none';}, 2000); 
 
                     setStatus('Connecting...', 'var(--warning)');
-                    if (connectBtn) {
-                        connectBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Connecting...';
-                        connectBtn.style.background = 'var(--warning)';
-                        connectBtn.disabled = true;
-                    }
+                    connectBtnMain.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Connecting...';
+                    connectBtnMain.style.background = 'var(--warning)';
+                    connectBtnMain.disabled = true;
 
                     try {
                         const resp = await fetch('http://127.0.0.1:5000/api/connect', {
@@ -1447,135 +1741,252 @@
 
                         if (resp.ok && result.status === 'started') {
                             setStatus('Connected', 'var(--success)');
-                            if (connectBtn) {
-                                connectBtn.innerHTML = '<i class="fas fa-check"></i> Connected';
-                                connectBtn.style.background = 'var(--success)';
-                            }
-                            // Close modal on successful connection after a short delay for "Saved!" msg
+                            connectBtnMain.innerHTML = '<i class="fas fa-check"></i> Connected';
+                            connectBtnMain.style.background = 'var(--success)';
                             setTimeout(() => { if (settingsModal) settingsModal.style.display = 'none'; }, 1000);
                         } else {
                             const errorMsg = result.error || `Connection failed (status ${resp.status}). Check token or backend.`;
                             setStatus(errorMsg, 'var(--danger)');
-                            if (connectBtn) {
-                                connectBtn.innerHTML = '<i class="fas fa-plug"></i> Connect to API';
-                                connectBtn.style.background = 'var(--primary)';
-                            }
-                            alert(`Connection Failed: ${errorMsg}`); // Show error in alert
+                            connectBtnMain.innerHTML = '<i class="fas fa-plug"></i> Connect to API';
+                            connectBtnMain.style.background = 'var(--primary)';
+                            alert(`Connection Failed: ${errorMsg}`); 
                         }
                     } catch (e) {
                         console.error('Failed to connect to backend API:', e);
                         setStatus('Connection Error (Backend)', 'var(--danger)');
-                        if (connectBtn) {
-                            connectBtn.innerHTML = '<i class="fas fa-plug"></i> Connect to API';
-                            connectBtn.style.background = 'var(--primary)';
-                        }
+                        connectBtnMain.innerHTML = '<i class="fas fa-plug"></i> Connect to API';
+                        connectBtnMain.style.background = 'var(--primary)';
                         alert('Failed to connect to backend. Is the server running and accessible?');
                     } finally {
-                        if (connectBtn) {
-                            connectBtn.disabled = false;
-                        }
+                        connectBtnMain.disabled = false;
                     }
                 });
+            } else {
+                 console.warn("[DEBUG] Element with ID 'saveSettingsBtn' not found. Listener not attached.");
             }
 
-            // View Switching Logic
-            if (navStrategiesBtn) {
-                navStrategiesBtn.addEventListener('click', function() {
-                    if (dashboardView) dashboardView.style.display = 'none';
-                    if (strategiesView) strategiesView.style.display = 'block';
-                    else console.warn("strategiesView element not found for display.");
-                    // Optional: Add active class styling to navStrategiesBtn and remove from other main nav buttons
-                    console.log("Switched to Strategies View");
-                    // You might want to load strategies here if not loaded automatically
-                    // fetchAndDisplayStrategies(); 
-                });
-            }
-
+            // View Switching Logic for Home/Dashboard
             if (homeNavLogo) {
                 homeNavLogo.addEventListener('click', function() {
-                    if (strategiesView) strategiesView.style.display = 'none';
-                    if (dashboardView) dashboardView.style.display = 'block'; // Assuming 'block' is the correct display style for dashboardView
-                    // Optional: Update active button styling
-                    console.log("Switched to Dashboard View");
+                    // console.log('[DEBUG] homeNavLogo clicked. Calling showView("dashboardView").'); // Already has debug log
+                    showView('dashboardView');
                 });
+            } else {
+                console.warn("[DEBUG] Element with ID 'homeNavLogo' not found. Listener not attached.");
             }
 
-            // Ensure default view state on load (dashboard visible, strategies hidden)
-            if (dashboardView) dashboardView.style.display = 'block'; 
-            if (strategiesView) strategiesView.style.display = 'none';
-            else if(navStrategiesBtn) console.warn("strategiesView element not found for initial hide during page load.");
+            // Ensure default view state on load (dashboard visible)
+            if (dashboardView) {
+                 dashboardView.style.display = 'block'; 
+                 console.log('[DEBUG] DOMContentLoaded: dashboardView display set to block.');
+            } else {
+                 console.error('[DEBUG] DOMContentLoaded: dashboardView element not found! Cannot set initial view.');
+            }
+            // strategiesView and strategyBuilderView are removed, so no need to hide them.
 
             async function loadAndDisplayCustomStrategies() {
-                const container = document.getElementById('strategiesListContainer');
-                if (!container) {
-                    console.error('strategiesListContainer element not found. Cannot display strategies.');
-                    // If strategiesView itself is missing, this function might not even be called,
-                    // or if it is, this check is the fallback.
-                    return;
-                }
-                container.innerHTML = '<p>Loading strategies...</p>';
+       console.log('[DEBUG] loadAndDisplayCustomStrategies: Function called (targeting panel).');
+       
+       const container = document.getElementById('liveStrategiesListContainer');
+       if (!container) {
+           console.error('[DEBUG] loadAndDisplayCustomStrategies: CRITICAL - liveStrategiesListContainer element NOT found in liveStrategiesPanel. Cannot display strategies.');
+           return; 
+       }
 
-                try {
-                    const response = await fetch('/api/strategies');
-                    if (!response.ok) {
-                        throw new Error(`HTTP error! status: ${response.status}`);
-                    }
-                    const strategies = await response.json();
-                    container.innerHTML = ''; // Clear loading message
+       container.innerHTML = '<p style="color: var(--gray); text-align:center; padding: 10px;">Loading strategies...</p>';
+       console.log('[DEBUG] loadAndDisplayCustomStrategies: "Loading strategies..." message set in panel.');
 
-                    if (strategies.length === 0) {
-                        container.innerHTML = '<p>No strategies found. Click the "Create New Strategy" button to start.</p>'; // TODO: Add create button later
-                    } else {
-                        strategies.forEach(strategy => {
-                            const strategyEl = document.createElement('div');
-                            strategyEl.className = 'strategy-item';
-                            strategyEl.style.border = '1px solid var(--border)';
-                            strategyEl.style.borderRadius = '8px';
-                            strategyEl.style.padding = '15px';
-                            strategyEl.style.marginBottom = '15px';
+       try {
+           console.log('[DEBUG] loadAndDisplayCustomStrategies: Attempting to fetch /api/strategies.');
+           const response = await fetch('/api/strategies');
+           console.log('[DEBUG] loadAndDisplayCustomStrategies: Fetch response status:', response.status);
+           if (!response.ok) {
+               const errorText = await response.text();
+               console.error(`[DEBUG] loadAndDisplayCustomStrategies: API error response text: ${errorText}`);
+               throw new Error(`HTTP error! status: ${response.status}. Body: ${errorText}`);
+           }
+           const strategies = await response.json();
+           console.log('[DEBUG] loadAndDisplayCustomStrategies: Strategies fetched successfully:', strategies);
+           
+           container.innerHTML = ''; // Clear loading message
 
-                            // Basic strategy info
-                            let content = `<h4 style="margin-bottom: 5px;">${strategy.strategy_name}</h4>`;
-                            // The backend currently doesn't store 'symbol' directly in the strategy object. 
-                            // This will be undefined unless the strategy_data payload included it.
-                            // For now, we'll display it if present, or omit.
-                            if (strategy.symbol) { // Check if symbol exists
-                               content += `<p style="font-size: 0.9em; color: var(--gray);">Symbol: ${strategy.symbol}</p>`;
-                            }
-                            content += `<p style="font-size: 0.9em; margin-bottom: 10px;">${strategy.description || 'No description.'}</p>`;
-                            
-                            // Placeholder for conditions and actions - can be more detailed later
-                            content += `<p style="font-size: 0.8em; color: var(--gray);">Conditions: ${JSON.stringify(strategy.conditions_group, null, 2)}</p>`;
-                            content += `<p style="font-size: 0.8em; color: var(--gray); margin-top: 5px;">Actions: ${JSON.stringify(strategy.actions, null, 2)}</p>`;
-                            
-                            content += `<div style="margin-top: 10px;">
-                                            <button class="btn btn-sm btn-outline-secondary" style="margin-right: 5px; padding: 5px 10px; font-size: 0.8em;">Edit</button>
-                                            <button class="btn btn-sm btn-outline-danger" style="padding: 5px 10px; font-size: 0.8em;">Delete</button>
-                                        </div>`;
-                            strategyEl.innerHTML = content;
-                            container.appendChild(strategyEl);
-                        });
-                    }
-                } catch (error) {
-                    console.error('Failed to load strategies:', error);
-                    container.innerHTML = '<p style="color: var(--danger);">Failed to load strategies. Please try again later.</p>';
-                }
-            }
+           if (strategies.length === 0) {
+               container.innerHTML = '<p style="color: var(--gray); text-align: center; padding: 10px;">No strategies defined yet. Click "Add New Strategy" to create one.</p>';
+               console.log('[DEBUG] loadAndDisplayCustomStrategies: "No strategies found" message set in panel.');
+           } else {
+               console.log('[DEBUG] loadAndDisplayCustomStrategies: Rendering strategy items in panel. Count:', strategies.length);
+               strategies.forEach(strategy => {
+                   const strategyItemEl = document.createElement('div');
+                   strategyItemEl.className = 'strategy-list-item'; // New class for styling items in the list
+                   strategyItemEl.style.border = '1px solid var(--border)';
+                   strategyItemEl.style.borderRadius = '8px';
+                   strategyItemEl.style.padding = '15px';
+                   strategyItemEl.style.backgroundColor = 'rgba(30, 41, 59, 0.3)'; // Slightly different background
+
+                   let statusText = strategy.is_active ? 'Active' : 'Disabled';
+                   let statusColor = strategy.is_active ? 'var(--success)' : 'var(--warning)';
+                   if (strategy.status_message && strategy.status_message !== statusText) {
+                        if (strategy.is_active && strategy.status_message === "Active") {/* default is fine */}
+                        else if (!strategy.is_active && strategy.status_message === "Disabled by user") { statusText = 'Disabled';}
+                        else { statusText = `${strategy.is_active ? 'Active' : 'Disabled'} (${strategy.status_message})`;}
+                   }
+                   
+                   // Simplified condition/action display for the panel
+                   let conditionsSummary = "No conditions";
+                   if (strategy.conditions_group && strategy.conditions_group.conditions && strategy.conditions_group.conditions.length > 0) {
+                       conditionsSummary = strategy.conditions_group.conditions.map(c => `${c.indicator} ${c.operator} ${c.value}`).join(', ');
+                       if (conditionsSummary.length > 50) conditionsSummary = conditionsSummary.substring(0, 47) + "...";
+                   }
+                   let actionsSummary = "No actions";
+                   if (strategy.actions && strategy.actions.length > 0) {
+                       actionsSummary = strategy.actions.map(a => a.type).join(', ');
+                        if (actionsSummary.length > 30) actionsSummary = actionsSummary.substring(0, 27) + "...";
+                   }
+
+                   let content = `
+                       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                           <h5 style="font-size: 1.1em; color: var(--light); margin:0;">${strategy.strategy_name || 'Unnamed Strategy'}</h5>
+                           <span style="font-size: 0.8em; color: ${statusColor}; font-weight: bold;">${statusText.toUpperCase()}</span>
+                       </div>
+                       <p style="font-size: 0.85em; color: var(--gray); margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${strategy.description || ''}">${strategy.description || 'No description.'}</p>
+                       <p style="font-size: 0.8em; color: var(--gray); margin-bottom: 4px;" title="${conditionsSummary}">Conditions: ${conditionsSummary}</p>
+                       <p style="font-size: 0.8em; color: var(--gray); margin-bottom: 12px;" title="${actionsSummary}">Actions: ${actionsSummary}</p>
+                       <div style="display: flex; justify-content: flex-start; gap: 8px; margin-top: 10px;">`;
+
+                   if (strategy.is_active) {
+                       content += `<button class="btn btn-sm btn-outline toggle-strategy-active-btn" data-id="${strategy.strategy_id}" data-action="disable" style="border-color: var(--warning); color: var(--warning);"><i class="fas fa-stop-circle"></i> Stop</button>`;
+                   } else {
+                       content += `<button class="btn btn-sm btn-outline toggle-strategy-active-btn" data-id="${strategy.strategy_id}" data-action="enable" style="border-color: var(--success); color: var(--success);"><i class="fas fa-play-circle"></i> Run</button>`;
+                   }
+                   
+                   content += `
+                           <button class="btn btn-sm btn-outline edit-strategy-btn" data-id="${strategy.strategy_id}"><i class="fas fa-edit"></i> Edit</button>
+                           <button class="btn btn-sm btn-outline delete-strategy-btn" data-id="${strategy.strategy_id}" style="border-color:var(--danger); color:var(--danger); margin-left: auto;"><i class="fas fa-trash"></i> Delete</button>
+                       </div>`;
+                   
+                   strategyItemEl.innerHTML = content;
+                   container.appendChild(strategyItemEl);
+
+                   // Attach event listeners
+                   strategyItemEl.querySelector('.edit-strategy-btn').addEventListener('click', function() {
+                       // Logic to open modal for editing - will be fully implemented when modal is ready
+                       console.log('[DEBUG] Edit button clicked for strategy ID (panel):', this.dataset.id);
+                       openStrategyModalForEdit(this.dataset.id); // Assumes this function will be created
+                   });
+                   strategyItemEl.querySelector('.delete-strategy-btn').addEventListener('click', function() {
+                       handleDeleteStrategy(this.dataset.id); 
+                   });
+                   strategyItemEl.querySelector('.toggle-strategy-active-btn').addEventListener('click', function() {
+                       handleToggleStrategyActive(this.dataset.id, this.dataset.action);
+                   });
+               });
+           }
+       } catch (error) {
+           console.error('[DEBUG] loadAndDisplayCustomStrategies (panel): Error caught:', error.message, error.stack);
+           container.innerHTML = `<p style="color: var(--danger); text-align: center; padding: 10px;">Failed to load strategies: ${error.message}</p>`;
+       }
+   }
 
             // Modify navStrategiesBtn event listener to call loadAndDisplayCustomStrategies
-            if (navStrategiesBtn) {
-                navStrategiesBtn.addEventListener('click', function() {
-                    if (dashboardView) dashboardView.style.display = 'none';
-                    if (strategiesView) {
-                        strategiesView.style.display = 'block';
-                        loadAndDisplayCustomStrategies(); // Call when switching to the view
-                    } else {
-                        console.warn("strategiesView element not found for display. Cannot load strategies.");
-                    }
-                    console.log("Switched to Strategies View");
-                });
-            }
+            // The navStrategiesBtn listener was updated in the previous step (Subtask 3 of this Stage)
+            // to open the modal for new strategy creation. It no longer uses showView.
+            // The old logic that directly manipulated styles for strategiesView is confirmed removed.
+            
+            // --- Globally Accessible Functions (defined within DOMContentLoaded) ---
+            window.openStrategyModalForEdit = async function(strategyId) {
+                console.log('[DEBUG] openStrategyModalForEdit called for ID:', strategyId);
+                if (!strategyId) return;
 
+                // Ensure modal elements are available (they are declared at the top of DOMContentLoaded)
+                if (!strategyModalTitle || !strategyModalIdInput || !strategyModalNameInput /* ... add all other modal inputs */) {
+                    console.error("[DEBUG] Critical modal elements missing in openStrategyModalForEdit. Cannot proceed.");
+                    alert("Error: Modal components are missing.");
+                    return;
+                }
+
+                try {
+                    const response = await fetch(`/api/strategies/${strategyId}`);
+                    if (!response.ok) throw new Error(`Failed to fetch strategy: ${response.status}`);
+                    const strategy = await response.json();
+
+                    strategyModalTitle.textContent = 'Edit Strategy';
+                    strategyModalIdInput.value = strategy.strategy_id;
+                    strategyModalNameInput.value = strategy.strategy_name || '';
+                    strategyModalDescriptionInput.value = strategy.description || '';
+                    strategyModalIsActiveInput.checked = strategy.is_active === undefined ? true : strategy.is_active;
+
+                    if (strategy.conditions_group && strategy.conditions_group.conditions && strategy.conditions_group.conditions.length > 0) {
+                        const cond = strategy.conditions_group.conditions[0];
+                        strategyModalConditionIndicator.value = cond.indicator || 'RSI';
+                        strategyModalConditionOperator.value = cond.operator || '<';
+                        strategyModalConditionValue.value = cond.value || '';
+                    } else {
+                        strategyModalConditionIndicator.selectedIndex = 0;
+                        strategyModalConditionOperator.selectedIndex = 0;
+                        strategyModalConditionValue.value = '';
+                    }
+                    if (strategy.actions && strategy.actions.length > 0) {
+                        const act = strategy.actions[0];
+                        strategyModalActionType.value = act.type || 'BUY';
+                        strategyModalActionDetails.value = act.details || '';
+                    } else {
+                        strategyModalActionType.selectedIndex = 0;
+                        strategyModalActionDetails.value = '';
+                    }
+                    openModal(); // Assumes openModal is defined within this scope
+                } catch (error) {
+                    console.error('Error fetching strategy for modal editing:', error);
+                    alert('Could not load strategy data for editing.');
+                }
+            };
+
+            window.handleDeleteStrategy = async function(strategyId) {
+                console.log('[DEBUG] handleDeleteStrategy called for ID:', strategyId);
+                if (!strategyId) {
+                    alert("Strategy ID is missing. Cannot delete.");
+                    return;
+                }
+                if (confirm('Are you sure you want to delete this strategy?')) {
+                    try {
+                        const response = await fetch(`/api/strategies/${strategyId}`, { method: 'DELETE' });
+                        if (!response.ok) {
+                            const errorData = await response.json().catch(() => ({ detail: 'Unknown error during delete.' }));
+                            throw new Error(`Failed to delete strategy: ${response.status} - ${errorData.detail || 'Server error'}`);
+                        }
+                        alert('Strategy deleted successfully.');
+                        loadAndDisplayCustomStrategies(); // Refresh the list
+                    } catch (error) {
+                        console.error('Error deleting strategy:', error);
+                        alert(`Could not delete strategy: ${error.message}`);
+                    }
+                }
+            };
+
+            window.handleToggleStrategyActive = async function(strategyId, action) {
+                console.log(`[DEBUG] handleToggleStrategyActive called for ID: ${strategyId}, Action: ${action}`);
+                if (!strategyId || !action) {
+                    alert("Strategy ID or action is missing. Cannot proceed.");
+                    return;
+                }
+                const endpoint = action === 'enable' ? `/api/strategies/${strategyId}/enable` : `/api/strategies/${strategyId}/disable`;
+                try {
+                    const response = await fetch(endpoint, { method: 'POST' });
+                    if (!response.ok) {
+                        const errorData = await response.json().catch(() => ({ detail: `Unknown error during ${action}.` }));
+                        throw new Error(`Failed to ${action} strategy: ${response.status} - ${errorData.detail || 'Server error'}`);
+                    }
+                    // const result = await response.json(); // Contains the updated strategy
+                    alert(`Strategy successfully ${action === 'enable' ? 'enabled (run)' : 'disabled (stopped)'}.`);
+                    loadAndDisplayCustomStrategies(); // Refresh the list
+                } catch (error) {
+                    console.error(`Error ${action} strategy:`, error);
+                    alert(`Could not ${action} strategy: ${error.message}`);
+                }
+            };
+
+            // --- End Globally Accessible Functions ---
+
+            loadAndDisplayCustomStrategies(); // Populate the panel on page load
         });
         
         // The old, separate saveSettingsBtn listener is removed as its functionality 
