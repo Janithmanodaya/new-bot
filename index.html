@@ -24,6 +24,15 @@
             --border: rgba(255, 255, 255, 0.1);
         }
         
+        .strategy-list-item {
+            /* display: flex; flex-direction: column; */
+            /* margin-bottom: 10px; */ /* Gap is handled by flex container now */
+        }
+        .strategy-list-item h5 { /* Ensure consistent margin for the title */
+            margin-top: 0;
+            margin-bottom: 8px;
+        }
+
         * {
             margin: 0;
             padding: 0;
@@ -455,29 +464,6 @@
                 grid-template-columns: 1fr;
             }
         }
-        /* Added styles for strategy view */
-        .btn-sm {
-            padding: 5px 10px;
-            font-size: 0.875em; /* Example size */
-        }
-        .strategy-item:hover {
-           transform: translateY(-3px);
-           box-shadow: 0 6px 12px rgba(0, 0, 0, 0.2);
-        }
-        /* Ensure icons in buttons are aligned */
-        .btn i {
-           margin-right: 5px;
-        }
-        /* Styles for Strategy Builder View */
-        #strategyBuilderView label {
-            color: var(--light); /* Ensure labels are visible */
-        }
-        #strategyBuilderView fieldset {
-            border-color: var(--border); /* Ensure consistent border color */
-        }
-        #strategyBuilderView legend {
-            color: var(--gray); /* Ensure legend text is styled */
-        }
     </style>
 </head>
 <body>
@@ -578,6 +564,22 @@
                         </tbody>
                     </table>
                 </div>
+
+                <!-- Live Strategies Panel START -->
+                <div id="liveStrategiesPanel" class="indicator-card" style="margin-top: 20px; padding: 20px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                        <h2 style="font-size: 18px; font-weight: 600; color: var(--light);">My Strategies</h2>
+                        <button class="btn btn-sm" id="openStrategyModalBtn">
+                            <i class="fas fa-plus"></i> Add New Strategy
+                        </button>
+                    </div>
+                    <div id="liveStrategiesListContainer" style="display: flex; flex-direction: column; gap: 15px;">
+                        <!-- Strategies will be loaded here by JavaScript -->
+                        <!-- Placeholder message if no strategies -->
+                        <p style="color: var(--gray); text-align: center;">Loading strategies...</p>
+                    </div>
+                </div>
+                <!-- Live Strategies Panel END -->
             </div>
             
             <div class="sidebar">
@@ -667,96 +669,6 @@
             </div>
         </div>
 
-        <!-- Strategies View (Initially Hidden) -->
-        <div id="strategiesView" style="display:none; padding-top: 20px;">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding: 0 10px;">
-                <h2 style="font-size: 24px; font-weight: 600; color: var(--light);">My Custom Strategies</h2>
-                <button class="btn" id="createNewStrategyBtn" style="display: flex; align-items: center; gap: 8px;">
-                    <i class="fas fa-plus"></i> Create New Strategy
-                </button>
-            </div>
-            <div id="strategiesListContainer" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(350px, 1fr)); gap: 20px; padding: 0 10px;">
-                <!-- Strategies will be loaded here by JavaScript -->
-            </div>
-        </div>
-
-        <!-- Strategy Builder View (Initially Hidden) -->
-        <div id="strategyBuilderView" style="display:none; padding-top: 20px;">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding: 0 10px;">
-                <h2 id="strategyBuilderTitle" style="font-size: 24px; font-weight: 600; color: var(--light);">Create New Strategy</h2>
-                <div>
-                    <button class="btn btn-outline" id="cancelStrategyBtn" style="margin-right: 10px;"><i class="fas fa-times"></i> Cancel</button>
-                    <button class="btn" id="saveStrategyBtn"><i class="fas fa-save"></i> Save Strategy</button>
-                </div>
-            </div>
-
-            <div class="form-container" style="background: var(--card-bg); border-radius: 12px; border: 1px solid var(--border); padding: 25px;">
-                <input type="hidden" id="strategyIdInput" value=""> <!-- For storing ID when editing -->
-
-                <div class="form-group" style="margin-bottom: 20px;">
-                    <label for="strategyNameInput" style="display: block; margin-bottom: 8px; font-weight: 500;">Strategy Name</label>
-                    <input type="text" id="strategyNameInput" placeholder="e.g., 'RSI Buy Signal'" style="width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--dark); color: var(--light);">
-                </div>
-
-                <div class="form-group" style="margin-bottom: 20px;">
-                    <label for="strategyDescriptionInput" style="display: block; margin-bottom: 8px; font-weight: 500;">Description</label>
-                    <textarea id="strategyDescriptionInput" placeholder="Describe the strategy's logic and purpose" style="width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--dark); color: var(--light); min-height: 80px;"></textarea>
-                </div>
-
-                <div class="form-group" style="margin-bottom: 20px; display: flex; align-items: center;">
-                    <input type="checkbox" id="strategyIsActiveInput" style="margin-right: 10px; width: 18px; height: 18px;">
-                    <label for="strategyIsActiveInput" style="font-weight: 500; margin-bottom: 0;">Strategy is Active</label>
-                </div>
-
-                <fieldset style="border: 1px solid var(--border); border-radius: 8px; padding: 15px; margin-bottom: 20px;">
-                    <legend style="padding: 0 10px; font-weight: 500; color: var(--gray);">Conditions</legend>
-                    <div id="conditionsContainer">
-                        <!-- Conditions will be added here dynamically -->
-                        <div class="condition-item" style="display: flex; gap: 10px; align-items: center; margin-bottom: 10px;">
-                            <select class="condition-indicator" style="padding: 8px; border-radius: 6px; background: var(--dark); color: var(--light); border: 1px solid var(--border);">
-                                <option value="RSI">RSI</option>
-                                <option value="MACD">MACD</option>
-                                <option value="STOCH">Stochastic</option>
-                                <option value="PRICE">Price</option>
-                            </select>
-                            <select class="condition-operator" style="padding: 8px; border-radius: 6px; background: var(--dark); color: var(--light); border: 1px solid var(--border);">
-                                <option value="<">&lt;</option>
-                                <option value="<=">&lt;=</option>
-                                <option value="==">==</option>
-                                <option value=">=">&gt;=</option>
-                                <option value=">">&gt;</option>
-                                <option value="CROSS_ABOVE">Crosses Above</option>
-                                <option value="CROSS_BELOW">Crosses Below</option>
-                            </select>
-                            <input type="text" class="condition-value" placeholder="Value (e.g., 30)" style="padding: 8px; border-radius: 6px; background: var(--dark); color: var(--light); border: 1px solid var(--border); flex-grow: 1;">
-                            <!-- <button class="btn btn-outline btn-sm remove-condition-btn" style="border-color: var(--danger); color: var(--danger);">-</button> -->
-                        </div>
-                    </div>
-                    <!-- <button class="btn btn-outline btn-sm" id="addConditionBtn" style="margin-top:10px;"><i class="fas fa-plus"></i> Add Condition</button> -->
-                    <p style="font-size:0.8em; color:var(--gray); margin-top:5px;">Note: For simplicity, currently supports one condition. Grouped and multiple conditions will be a future enhancement.</p>
-                </fieldset>
-
-                <fieldset style="border: 1px solid var(--border); border-radius: 8px; padding: 15px; margin-bottom: 20px;">
-                    <legend style="padding: 0 10px; font-weight: 500; color: var(--gray);">Actions</legend>
-                    <div id="actionsContainer">
-                        <!-- Actions will be added here dynamically -->
-                        <div class="action-item" style="display: flex; gap: 10px; align-items: center; margin-bottom: 10px;">
-                            <select class="action-type" style="padding: 8px; border-radius: 6px; background: var(--dark); color: var(--light); border: 1px solid var(--border);">
-                                <option value="BUY">BUY</option>
-                                <option value="SELL">SELL</option>
-                                <option value="NOTIFY_EMAIL">Notify (Email)</option>
-                                <option value="NOTIFY_ALERT">Notify (Alert)</option>
-                            </select>
-                            <input type="text" class="action-details" placeholder="Action details (e.g., stake amount, email address)" style="padding: 8px; border-radius: 6px; background: var(--dark); color: var(--light); border: 1px solid var(--border); flex-grow: 1;">
-                            <!-- <button class="btn btn-outline btn-sm remove-action-btn" style="border-color: var(--danger); color: var(--danger);">-</button> -->
-                        </div>
-                    </div>
-                    <!-- <button class="btn btn-outline btn-sm" id="addActionBtn" style="margin-top:10px;"><i class="fas fa-plus"></i> Add Action</button> -->
-                    <p style="font-size:0.8em; color:var(--gray); margin-top:5px;">Note: For simplicity, currently supports one action. Multiple actions will be a future enhancement.</p>
-                </fieldset>
-            </div>
-        </div>
-
         <footer>
             <p>Deriv Market Analytics Dashboard • Data provided by Deriv API • Real-time market analysis</p>
             <p>This is a demo interface. Connect to Deriv API for live data.</p>
@@ -773,6 +685,63 @@
             </div>
         </div>
     </div>
+
+   <!-- Strategy Create/Edit Modal (Initially Hidden) -->
+   <div id="strategyEditModal" style="display:none; position:fixed; top:0; left:0; width:100vw; height:100vh; background:rgba(15,23,42,0.85); z-index:1000; align-items:center; justify-content:center; padding:20px;">
+       <div style="background:var(--secondary); border-radius:16px; padding:25px 30px; width:100%; max-width:600px; box-shadow:0 8px 32px rgba(0,0,0,0.3); border:1px solid var(--border); position:relative; max-height: 90vh; overflow-y: auto;">
+           <button id="closeStrategyEditModalBtn" style="position:absolute; top:15px; right:15px; background:none; border:none; color:var(--gray); font-size:24px; cursor:pointer; line-height: 1;">&times;</button>
+           <h2 id="strategyModalTitle" style="margin-bottom:25px; font-size:22px; color:var(--light); text-align:left;">Create New Strategy</h2>
+
+           <!-- Form content reused from strategyBuilderView design -->
+           <input type="hidden" id="strategyModalIdInput" value="">
+
+           <div class="form-group" style="margin-bottom:18px;">
+               <label for="strategyModalNameInput" style="display:block; margin-bottom:7px; font-weight:500; font-size:0.9em;">Strategy Name</label>
+               <input type="text" id="strategyModalNameInput" placeholder="e.g., 'RSI Buy Signal'" style="width:100%; padding:10px 12px; border-radius:8px; border:1px solid var(--border); background:var(--dark); color:var(--light); font-size:0.95em;">
+           </div>
+
+           <div class="form-group" style="margin-bottom:18px;">
+               <label for="strategyModalDescriptionInput" style="display:block; margin-bottom:7px; font-weight:500; font-size:0.9em;">Description</label>
+               <textarea id="strategyModalDescriptionInput" placeholder="Describe the strategy's logic and purpose" style="width:100%; padding:10px 12px; border-radius:8px; border:1px solid var(--border); background:var(--dark); color:var(--light); min-height:70px; font-size:0.95em;"></textarea>
+           </div>
+
+           <div class="form-group" style="margin-bottom:18px; display:flex; align-items:center;">
+               <input type="checkbox" id="strategyModalIsActiveInput" style="margin-right:10px; width:17px; height:17px; accent-color: var(--primary);">
+               <label for="strategyModalIsActiveInput" style="font-weight:500; font-size:0.9em; margin-bottom:0;">Strategy is Active</label>
+           </div>
+
+           <fieldset style="border:1px solid var(--border); border-radius:8px; padding:12px 15px; margin-bottom:18px;">
+               <legend style="padding:0 8px; font-weight:500; color:var(--gray); font-size:0.85em;">Condition (Single)</legend>
+               <div id="strategyModalConditionsContainer" class="condition-item" style="display:flex; gap:10px; align-items:center;">
+                   <select id="strategyModalConditionIndicator" class="condition-indicator" style="padding:8px; border-radius:6px; background:var(--dark); color:var(--light); border:1px solid var(--border); flex:1;">
+                       <option value="RSI">RSI</option> <option value="MACD">MACD</option> <option value="STOCH">Stochastic</option> <option value="PRICE">Price</option>
+                       <option value="EMA10">EMA10</option> <option value="EMA20">EMA20</option> <option value="EMA30">EMA30</option> <option value="EMA50">EMA50</option> <option value="EMA100">EMA100</option> <option value="EMA200">EMA200</option>
+                       <option value="CCI">CCI</option>
+                   </select>
+                   <select id="strategyModalConditionOperator" class="condition-operator" style="padding:8px; border-radius:6px; background:var(--dark); color:var(--light); border:1px solid var(--border); flex:1;">
+                       <option value="<">&lt;</option> <option value="<=">&lt;=</option> <option value="==">==</option> <option value=">=">&gt;=</option> <option value=">">&gt;</option>
+                       <option value="CROSS_ABOVE">Crosses Above</option> <option value="CROSS_BELOW">Crosses Below</option>
+                   </select>
+                   <input type="text" id="strategyModalConditionValue" class="condition-value" placeholder="Value" style="padding:8px; border-radius:6px; background:var(--dark); color:var(--light); border:1px solid var(--border); flex:1;">
+               </div>
+           </fieldset>
+
+           <fieldset style="border:1px solid var(--border); border-radius:8px; padding:12px 15px; margin-bottom:25px;">
+               <legend style="padding:0 8px; font-weight:500; color:var(--gray); font-size:0.85em;">Action (Single)</legend>
+               <div id="strategyModalActionsContainer" class="action-item" style="display:flex; gap:10px; align-items:center;">
+                   <select id="strategyModalActionType" class="action-type" style="padding:8px; border-radius:6px; background:var(--dark); color:var(--light); border:1px solid var(--border); flex:1;">
+                       <option value="BUY">BUY</option> <option value="SELL">SELL</option>
+                       <option value="NOTIFY_EMAIL">Notify (Email)</option> <option value="NOTIFY_ALERT">Notify (Alert)</option>
+                   </select>
+                   <input type="text" id="strategyModalActionDetails" class="action-details" placeholder="Action details (e.g., stake, email)" style="padding:8px; border-radius:6px; background:var(--dark); color:var(--light); border:1px solid var(--border); flex:1;">
+               </div>
+           </fieldset>
+           <div style="display:flex; justify-content:flex-end; gap:12px;">
+                <button id="cancelStrategyModalBtn" class="btn btn-outline" type="button"><i class="fas fa-times"></i> Cancel</button>
+                <button id="saveStrategyModalBtn" class="btn" type="button"><i class="fas fa-save"></i> Save Strategy</button>
+           </div>
+       </div>
+   </div>
 
     <script>
         let currentSelectedSymbol = ''; // Global variable for the currently selected symbol
@@ -1052,6 +1021,136 @@
         }
 
         document.addEventListener('DOMContentLoaded', async function() {
+            const strategyEditModal = document.getElementById('strategyEditModal');
+            const openStrategyModalBtn = document.getElementById('openStrategyModalBtn');
+            const closeStrategyEditModalBtn = document.getElementById('closeStrategyEditModalBtn');
+            const cancelStrategyModalBtn = document.getElementById('cancelStrategyModalBtn');
+            const saveStrategyModalBtn = document.getElementById('saveStrategyModalBtn');
+
+            const strategyModalTitle = document.getElementById('strategyModalTitle');
+            const strategyModalIdInput = document.getElementById('strategyModalIdInput');
+            const strategyModalNameInput = document.getElementById('strategyModalNameInput');
+            const strategyModalDescriptionInput = document.getElementById('strategyModalDescriptionInput');
+            const strategyModalIsActiveInput = document.getElementById('strategyModalIsActiveInput');
+            const strategyModalConditionIndicator = document.getElementById('strategyModalConditionIndicator');
+            const strategyModalConditionOperator = document.getElementById('strategyModalConditionOperator');
+            const strategyModalConditionValue = document.getElementById('strategyModalConditionValue');
+            const strategyModalActionType = document.getElementById('strategyModalActionType');
+            const strategyModalActionDetails = document.getElementById('strategyModalActionDetails');
+
+            function openModal() {
+                if(strategyEditModal) strategyEditModal.style.display = 'flex';
+            }
+            function closeModal() {
+                if(strategyEditModal) strategyEditModal.style.display = 'none';
+            }
+
+            if (openStrategyModalBtn) {
+                openStrategyModalBtn.addEventListener('click', function() {
+                    console.log('[DEBUG] openStrategyModalBtn clicked for new strategy.');
+                    if(strategyModalTitle) strategyModalTitle.textContent = 'Create New Strategy';
+                    if(strategyModalIdInput) strategyModalIdInput.value = '';
+                    if(strategyModalNameInput) strategyModalNameInput.value = '';
+                    if(strategyModalDescriptionInput) strategyModalDescriptionInput.value = '';
+                    if(strategyModalIsActiveInput) strategyModalIsActiveInput.checked = true;
+                    if(strategyModalConditionIndicator) strategyModalConditionIndicator.selectedIndex = 0;
+                    if(strategyModalConditionOperator) strategyModalConditionOperator.selectedIndex = 0;
+                    if(strategyModalConditionValue) strategyModalConditionValue.value = '';
+                    if(strategyModalActionType) strategyModalActionType.selectedIndex = 0;
+                    if(strategyModalActionDetails) strategyModalActionDetails.value = '';
+                    openModal();
+                });
+            }
+
+            if(closeStrategyEditModalBtn) closeStrategyEditModalBtn.addEventListener('click', closeModal);
+            if(cancelStrategyModalBtn) cancelStrategyModalBtn.addEventListener('click', closeModal);
+
+            if (saveStrategyModalBtn) {
+                saveStrategyModalBtn.addEventListener('click', async function() {
+                    const strategyId = strategyModalIdInput.value;
+                    const strategyName = strategyModalNameInput.value.trim();
+
+                    if (!strategyName) {
+                        alert('Strategy Name is required.');
+                        return;
+                    }
+
+                    const conditionsGroup = {
+                        logical_operator: 'AND',
+                        conditions: [{
+                            indicator: strategyModalConditionIndicator.value,
+                            operator: strategyModalConditionOperator.value,
+                            value: strategyModalConditionValue.value.trim()
+                        }]
+                    };
+                    if (!strategyModalConditionIndicator.value || !strategyModalConditionOperator.value || !strategyModalConditionValue.value.trim()) {
+                        conditionsGroup.conditions = [];
+                    }
+
+                    let actions = [{ // Changed from const to let
+                        type: strategyModalActionType.value,
+                        details: strategyModalActionDetails.value.trim()
+                    }];
+                    if (!strategyModalActionType.value) { // Corrected variable name
+                        actions = [];
+                    }
+
+                    const strategyPayload = {
+                        strategy_name: strategyName,
+                        description: strategyModalDescriptionInput.value.trim(),
+                        is_active: strategyModalIsActiveInput.checked,
+                        conditions_group: conditionsGroup,
+                        actions: actions
+                    };
+
+                    let url = '/api/strategies';
+                    let method = 'POST';
+                    if (strategyId) {
+                        url = `/api/strategies/${strategyId}`;
+                        method = 'PUT';
+                    }
+
+                    console.log(`[DEBUG] Saving strategy from modal (${method}). URL: ${url}, Payload:`, JSON.stringify(strategyPayload));
+                    try {
+                        const response = await fetch(url, {
+                            method: method,
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(strategyPayload)
+                        });
+                        if (!response.ok) {
+                            const errorData = await response.json().catch(() => ({ detail: 'Unknown error during save.' }));
+                            throw new Error(`Failed to save strategy: ${response.status} - ${errorData.detail || errorData.error || 'Server error'}`);
+                        }
+                        await response.json();
+                        alert('Strategy saved successfully!');
+                        closeModal();
+                        loadAndDisplayCustomStrategies();
+                    } catch (error) {
+                        console.error('Error saving strategy from modal:', error);
+                        alert(`Could not save strategy: ${error.message}`);
+                    }
+                });
+            }
+
+            const navStrategiesBtn = document.getElementById('navStrategiesBtn');
+            if (navStrategiesBtn) {
+                navStrategiesBtn.removeEventListener('click', showView);
+                navStrategiesBtn.addEventListener('click', function() {
+                    console.log('[DEBUG] Header navStrategiesBtn clicked, opening modal for new strategy.');
+                    if(strategyModalTitle) strategyModalTitle.textContent = 'Create New Strategy';
+                    if(strategyModalIdInput) strategyModalIdInput.value = '';
+                    if(strategyModalNameInput) strategyModalNameInput.value = '';
+                    if(strategyModalDescriptionInput) strategyModalDescriptionInput.value = '';
+                    if(strategyModalIsActiveInput) strategyModalIsActiveInput.checked = true;
+                    if(strategyModalConditionIndicator) strategyModalConditionIndicator.selectedIndex = 0;
+                    if(strategyModalConditionOperator) strategyModalConditionOperator.selectedIndex = 0;
+                    if(strategyModalConditionValue) strategyModalConditionValue.value = '';
+                    if(strategyModalActionType) strategyModalActionType.selectedIndex = 0;
+                    if(strategyModalActionDetails) strategyModalActionDetails.value = '';
+                    openModal();
+                });
+            }
+
             // Register financial chart types
             if (typeof Chart !== 'undefined' && Chart.FinancialController) { // For chartjs-chart-financial v0.1.x
                  Chart.register(Chart.FinancialController, Chart.OhlcController, Chart.CandlestickController, Chart.OhlcElement, Chart.CandlestickElement);
@@ -1477,13 +1576,13 @@
 
             // View Switching Elements
             const dashboardView = document.getElementById('dashboardView');
-            const strategiesView = document.getElementById('strategiesView'); 
-            const strategyBuilderView = document.getElementById('strategyBuilderView'); // Added
-            const navStrategiesBtn = document.getElementById('navStrategiesBtn');
+            // const strategiesView = document.getElementById('strategiesView');  // Removed: strategiesView div is deleted
+            // const strategyBuilderView = document.getElementById('strategyBuilderView'); // Removed: strategyBuilderView div is deleted
+            const navStrategiesBtn = document.getElementById('navStrategiesBtn'); // This is the header button, now repurposed for modal.
             const homeNavLogo = document.getElementById('homeNavLogo');
-            const createNewStrategyBtn = document.getElementById('createNewStrategyBtn'); // Added
+            // const createNewStrategyBtn = document.getElementById('createNewStrategyBtn'); // Removed: Original button with this ID was in strategiesView. Modal uses openStrategyModalBtn.
 
-            const mainViews = ['dashboardView', 'strategiesView', 'strategyBuilderView'];
+            const mainViews = ['dashboardView'];
 
             function showView(viewIdToShow) {
                 mainViews.forEach(viewId => {
@@ -1491,20 +1590,14 @@
                     if (viewElement) {
                         viewElement.style.display = (viewId === viewIdToShow) ? 'block' : 'none';
                     } else {
-                        // Warn if the view we intend to show, or a primary alternative view, is missing.
-                        if (viewId === viewIdToShow || viewId === 'strategiesView' || viewId === 'strategyBuilderView') {
-                           console.warn(`View element not found: ${viewId}. Ensure its HTML is in index.html.`);
+                        // Warn if the view we intend to show is missing.
+                        if (viewId === viewIdToShow) {
+                           console.warn(`[DEBUG] showView: View element not found: ${viewId}. Ensure its HTML is in index.html.`);
                         }
                     }
                 });
-
-                if (viewIdToShow === 'strategiesView' && typeof loadAndDisplayCustomStrategies === 'function') {
-                    loadAndDisplayCustomStrategies();
-                }
-                // Example for future:
-                // if (viewIdToShow === 'strategyBuilderView' && typeof initializeStrategyBuilder === 'function') {
-                //    initializeStrategyBuilder(); 
-                // }
+                // The specific call to loadAndDisplayCustomStrategies for 'strategiesView' is removed,
+                // as 'strategiesView' is no longer a main view and strategies are loaded differently.
             }
 
             function openSettingsModal() {
@@ -1616,418 +1709,157 @@
             // Ensure default view state on load (dashboard visible, strategies hidden)
             if (dashboardView) dashboardView.style.display = 'block';
             if (strategiesView) strategiesView.style.display = 'none';
-            // else if(navStrategiesBtn) console.warn("strategiesView element not found for initial hide during page load."); // This warning can be removed if strategiesView is dynamically created by loadAndDisplayCustomStrategies or always present.
+            else if(navStrategiesBtn) console.warn("strategiesView element not found for initial hide during page load.");
 
             async function loadAndDisplayCustomStrategies() {
-                let container = document.getElementById('strategiesListContainer');
-                if (!container) {
-                    console.error('strategiesListContainer element not found initially. Attempting to find/create strategiesView and container.');
-                    const mainContainer = document.querySelector('.container'); // Or wherever views are placed
-                    let strategiesViewDiv = document.getElementById('strategiesView');
+       console.log('[DEBUG] loadAndDisplayCustomStrategies: Function called (targeting panel).');
 
-                    if (mainContainer && !strategiesViewDiv) {
-                        console.log("strategiesView is missing, creating it dynamically as fallback.");
-                        strategiesViewDiv = document.createElement('div');
-                        strategiesViewDiv.id = 'strategiesView';
-                        strategiesViewDiv.style.display = 'none'; // Keep it hidden initially, showView will manage
-                        strategiesViewDiv.innerHTML = `
-                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding: 0 10px;">
-                                <h2 style="font-size: 24px; font-weight: 600; color: var(--light);">My Custom Strategies</h2>
-                                <button class="btn" id="createNewStrategyBtn" style="display: flex; align-items: center; gap: 8px;">
-                                    <i class="fas fa-plus"></i> Create New Strategy
-                                </button>
-                            </div>
-                            <div id="strategiesListContainer" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(350px, 1fr)); gap: 20px; padding: 0 10px;"></div>
-                        `;
-                        const footer = document.querySelector('footer');
-                        if (footer) {
-                           mainContainer.insertBefore(strategiesViewDiv, footer);
-                        } else {
-                           mainContainer.appendChild(strategiesViewDiv);
-                        }
-                        console.log("Dynamically created #strategiesView and #strategiesListContainer.");
-                        container = document.getElementById('strategiesListContainer'); // Re-assign container
-                    } else if (strategiesViewDiv && !container) { // strategiesView exists, but container inside it is missing
-                        console.error('strategiesView exists, but strategiesListContainer is missing. HTML structure might be incorrect. Trying to create container inside strategiesView.');
-                        const newContainerDiv = document.createElement('div');
-                        newContainerDiv.id = 'strategiesListContainer';
-                        newContainerDiv.style.display = 'grid';
-                        newContainerDiv.style.gridTemplateColumns = 'repeat(auto-fill, minmax(350px, 1fr))';
-                        newContainerDiv.style.gap = '20px';
-                        newContainerDiv.style.padding = '0 10px';
-                        // Append to strategiesView, assuming strategiesView's innerHTML was cleared or is minimal
-                        strategiesViewDiv.appendChild(newContainerDiv);
-                        container = newContainerDiv; // Re-assign
-                        if (container) console.log("Dynamically created #strategiesListContainer inside existing #strategiesView.");
-                    }
+       const container = document.getElementById('liveStrategiesListContainer');
+       if (!container) {
+           console.error('[DEBUG] loadAndDisplayCustomStrategies: CRITICAL - liveStrategiesListContainer element NOT found in liveStrategiesPanel. Cannot display strategies.');
+           return;
+       }
 
-                    if (!container) { // If still not found after dynamic creation attempt
-                       console.error("Failed to create or find strategiesListContainer even after dynamic attempt. Cannot display strategies.");
-                       const strategiesViewFallback = document.getElementById('strategiesView');
-                       if(strategiesViewFallback) {
-                           // Avoid overwriting entire strategiesView if it was correctly added in HTML but container is the issue.
-                           // Instead, show error within the container or a specific error message area.
-                           const errorMsgElement = document.createElement('p');
-                           errorMsgElement.style.color = 'var(--danger)';
-                           errorMsgElement.style.textAlign = 'center';
-                           errorMsgElement.textContent = 'Error: UI components for strategies are missing or failed to load. Please check HTML structure.';
-                           // Clear previous content of strategiesViewFallback and append error or append to a designated error spot
-                           strategiesViewFallback.innerHTML = ''; // Clear previous content like headers if they are part of this fallback
-                           strategiesViewFallback.appendChild(errorMsgElement);
-                       }
-                       return;
-                    }
-                }
-                container.innerHTML = '<p style="color: var(--gray);">Loading strategies...</p>';
+       container.innerHTML = '<p style="color: var(--gray); text-align:center; padding: 10px;">Loading strategies...</p>';
+       console.log('[DEBUG] loadAndDisplayCustomStrategies: "Loading strategies..." message set in panel.');
 
-                try {
-                    const response = await fetch('/api/strategies');
-                    if (!response.ok) {
-                        throw new Error(`HTTP error! status: ${response.status}`);
-                    }
-                    const strategies = await response.json();
-                    container.innerHTML = ''; // Clear loading message
+       try {
+           console.log('[DEBUG] loadAndDisplayCustomStrategies: Attempting to fetch /api/strategies.');
+           const response = await fetch('/api/strategies');
+           console.log('[DEBUG] loadAndDisplayCustomStrategies: Fetch response status:', response.status);
+           if (!response.ok) {
+               const errorText = await response.text();
+               console.error(`[DEBUG] loadAndDisplayCustomStrategies: API error response text: ${errorText}`);
+               throw new Error(`HTTP error! status: ${response.status}. Body: ${errorText}`);
+           }
+           const strategies = await response.json();
+           console.log('[DEBUG] loadAndDisplayCustomStrategies: Strategies fetched successfully:', strategies);
 
-                    if (strategies.length === 0) {
-                        container.innerHTML = '<p style="color: var(--gray); text-align: center; grid-column: 1 / -1;">No strategies found. Click the "Create New Strategy" button to start.</p>';
-                    } else {
-                        strategies.forEach(strategy => {
-                            const strategyEl = document.createElement('div');
-                            strategyEl.className = 'strategy-item indicator-card'; // Reuse indicator-card styling
-                            strategyEl.style.transition = 'transform 0.2s ease, box-shadow 0.2s ease'; // Add hover effects
+           container.innerHTML = ''; // Clear loading message
 
-                            let content = `<div class="indicator-header">
-                                              <h4 class="indicator-title" style="font-size: 17px;">${strategy.strategy_name || 'Unnamed Strategy'}</h4>
-                                          </div>`;
-                            content += `<p style="font-size: 0.9em; color: var(--gray); margin-bottom: 12px; min-height: 40px;">${strategy.description || 'No description.'}</p>`;
+           if (strategies.length === 0) {
+               container.innerHTML = '<p style="color: var(--gray); text-align: center; padding: 10px;">No strategies defined yet. Click "Add New Strategy" to create one.</p>';
+               console.log('[DEBUG] loadAndDisplayCustomStrategies: "No strategies found" message set in panel.');
+           } else {
+               console.log('[DEBUG] loadAndDisplayCustomStrategies: Rendering strategy items in panel. Count:', strategies.length);
+               strategies.forEach(strategy => {
+                   const strategyItemEl = document.createElement('div');
+                   strategyItemEl.className = 'strategy-list-item'; // New class for styling items in the list
+                   strategyItemEl.style.border = '1px solid var(--border)';
+                   strategyItemEl.style.borderRadius = '8px';
+                   strategyItemEl.style.padding = '15px';
+                   strategyItemEl.style.backgroundColor = 'rgba(30, 41, 59, 0.3)'; // Slightly different background
 
-                            // Display conditions and actions in a more readable, but still basic, way
-                            if (strategy.conditions_group && strategy.conditions_group.conditions && strategy.conditions_group.conditions.length > 0) {
-                                content += `<strong style="font-size:0.85em; color: var(--light);">Conditions:</strong><ul style="font-size:0.8em; color:var(--gray); margin-left:15px; margin-bottom:8px;">`;
-                                strategy.conditions_group.conditions.forEach(cond => {
-                                   content += `<li>${cond.indicator || cond.type} ${cond.operator} ${cond.value}</li>`;
-                                });
-                                content += `</ul>`;
-                            } else {
-                                content += `<p style="font-size:0.8em; color:var(--gray); margin-bottom:8px;">No conditions defined.</p>`;
-                            }
+                   let statusText = strategy.is_active ? 'Active' : 'Disabled';
+                   let statusColor = strategy.is_active ? 'var(--success)' : 'var(--warning)';
+                   if (strategy.status_message && strategy.status_message !== statusText) {
+                        if (strategy.is_active && strategy.status_message === "Active") {/* default is fine */}
+                        else if (!strategy.is_active && strategy.status_message === "Disabled by user") { statusText = 'Disabled';}
+                        else { statusText = `${strategy.is_active ? 'Active' : 'Disabled'} (${strategy.status_message})`;}
+                   }
 
-                            if (strategy.actions && strategy.actions.length > 0) {
-                                content += `<strong style="font-size:0.85em; color: var(--light);">Actions:</strong><ul style="font-size:0.8em; color:var(--gray); margin-left:15px; margin-bottom:15px;">`;
-                                strategy.actions.forEach(act => {
-                                   content += `<li>${act.type} ${act.details || ''}</li>`;
-                                });
-                                content += `</ul>`;
-                            } else {
-                                content += `<p style="font-size:0.8em; color:var(--gray); margin-bottom:15px;">No actions defined.</p>`;
-                            }
-                            
-                            let statusText = strategy.is_active ? 'Active' : 'Disabled';
-                            // Check if status_message exists and if it's different from the basic "Active"/"Disabled" or if it's "Active" but strategy is_active (to avoid "Active (Active)")
-                            if (strategy.status_message && (strategy.status_message !== statusText || (strategy.is_active && strategy.status_message === "Active" && statusText === "Active"))) {
-                                if (strategy.is_active && strategy.status_message === "Active") {
-                                     // If is_active is true and status_message is "Active", just show "Active"
-                                     // This case is implicitly handled by initial statusText if no other status_message is present
-                                } else if (!strategy.is_active && strategy.status_message === "Disabled by user") {
-                                    // If !is_active and status_message is "Disabled by user", just show "Disabled"
-                                     statusText = 'Disabled'; // Or 'Disabled (by user)' if preferred
-                                }
-                                else {
-                                     statusText = `${strategy.is_active ? 'Active' : 'Disabled'} (${strategy.status_message})`;
-                                }
-                            }
+                   // Simplified condition/action display for the panel
+                   let conditionsSummary = "No conditions";
+                   if (strategy.conditions_group && strategy.conditions_group.conditions && strategy.conditions_group.conditions.length > 0) {
+                       conditionsSummary = strategy.conditions_group.conditions.map(c => `${c.indicator} ${c.operator} ${c.value}`).join(', ');
+                       if (conditionsSummary.length > 50) conditionsSummary = conditionsSummary.substring(0, 47) + "...";
+                   }
+                   let actionsSummary = "No actions";
+                   if (strategy.actions && strategy.actions.length > 0) {
+                       actionsSummary = strategy.actions.map(a => a.type).join(', ');
+                        if (actionsSummary.length > 30) actionsSummary = actionsSummary.substring(0, 27) + "...";
+                   }
 
+                   let content = `
+                       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                           <h5 style="font-size: 1.1em; color: var(--light); margin:0;">${strategy.strategy_name || 'Unnamed Strategy'}</h5>
+                           <span style="font-size: 0.8em; color: ${statusColor}; font-weight: bold;">${statusText.toUpperCase()}</span>
+                       </div>
+                       <p style="font-size: 0.85em; color: var(--gray); margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${strategy.description || ''}">${strategy.description || 'No description.'}</p>
+                       <p style="font-size: 0.8em; color: var(--gray); margin-bottom: 4px;" title="${conditionsSummary}">Conditions: ${conditionsSummary}</p>
+                       <p style="font-size: 0.8em; color: var(--gray); margin-bottom: 12px;" title="${actionsSummary}">Actions: ${actionsSummary}</p>
+                       <div style="display: flex; justify-content: flex-start; gap: 8px; margin-top: 10px;">`;
 
-                            content += `<p style="font-size: 0.8em; color: var(--gray); margin-bottom: 10px;">Status: <strong style="color: ${strategy.is_active ? 'var(--success)' : 'var(--warning)'};">${statusText}</strong></p>`;
+                   if (strategy.is_active) {
+                       content += `<button class="btn btn-sm btn-outline toggle-strategy-active-btn" data-id="${strategy.strategy_id}" data-action="disable" style="border-color: var(--warning); color: var(--warning);"><i class="fas fa-stop-circle"></i> Stop</button>`;
+                   } else {
+                       content += `<button class="btn btn-sm btn-outline toggle-strategy-active-btn" data-id="${strategy.strategy_id}" data-action="enable" style="border-color: var(--success); color: var(--success);"><i class="fas fa-play-circle"></i> Run</button>`;
+                   }
 
-                            const toggleButtonHtml = strategy.is_active
-                                ? `<button class="btn btn-outline btn-sm toggle-strategy-active-btn" data-id="${strategy.strategy_id}" data-action="disable" style="padding: 6px 12px; font-size: 0.85em; border-color: var(--warning); color: var(--warning);"><i class="fas fa-toggle-off"></i> Disable</button>`
-                                : `<button class="btn btn-outline btn-sm toggle-strategy-active-btn" data-id="${strategy.strategy_id}" data-action="enable" style="padding: 6px 12px; font-size: 0.85em; border-color: var(--success); color: var(--success);"><i class="fas fa-toggle-on"></i> Enable</button>`;
+                   content += `
+                           <button class="btn btn-sm btn-outline edit-strategy-btn" data-id="${strategy.strategy_id}"><i class="fas fa-edit"></i> Edit</button>
+                           <button class="btn btn-sm btn-outline delete-strategy-btn" data-id="${strategy.strategy_id}" style="border-color:var(--danger); color:var(--danger); margin-left: auto;"><i class="fas fa-trash"></i> Delete</button>
+                       </div>`;
 
-                            content += `<div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: auto; padding-top:10px; border-top: 1px solid var(--border);">
-                                            ${toggleButtonHtml}
-                                            <button class="btn btn-outline btn-sm edit-strategy-btn" data-id="${strategy.strategy_id}" style="padding: 6px 12px; font-size: 0.85em;"><i class="fas fa-edit"></i> Edit</button>
-                                            <button class="btn btn-outline btn-sm delete-strategy-btn" data-id="${strategy.strategy_id}" style="padding: 6px 12px; font-size: 0.85em; border-color: var(--danger); color: var(--danger);"><i class="fas fa-trash"></i> Delete</button>
-                                        </div>`;
-                            strategyEl.innerHTML = content;
-                            container.appendChild(strategyEl);
+                   strategyItemEl.innerHTML = content;
+                   container.appendChild(strategyItemEl);
 
-                            // Add event listeners for new/modified buttons
-                            strategyEl.querySelector('.edit-strategy-btn').addEventListener('click', function() {
-                                handleEditStrategy(this.dataset.id); // Direct call, assuming it's in scope or on window
-                            });
-                            strategyEl.querySelector('.delete-strategy-btn').addEventListener('click', function() {
-                                handleDeleteStrategy(this.dataset.id); // Direct call
-                            });
-                            const toggleBtn = strategyEl.querySelector('.toggle-strategy-active-btn');
-                            if (toggleBtn) {
-                                toggleBtn.addEventListener('click', function() {
-                                    handleToggleStrategyActive(this.dataset.id, this.dataset.action); // Direct call
-                                });
-                            }
-                        });
-                    }
-                } catch (error) {
-                    console.error('Failed to load strategies:', error);
-                    container.innerHTML = '<p style="color: var(--danger); text-align: center; grid-column: 1 / -1;">Failed to load strategies. Please try again later.</p>';
-                }
-            }
+                   // Attach event listeners
+                   strategyItemEl.querySelector('.edit-strategy-btn').addEventListener('click', function() {
+                       // Logic to open modal for editing - will be fully implemented when modal is ready
+                       console.log('[DEBUG] Edit button clicked for strategy ID (panel):', this.dataset.id);
+                       openStrategyModalForEdit(this.dataset.id); // Assumes this function will be created
+                   });
+                   strategyItemEl.querySelector('.delete-strategy-btn').addEventListener('click', function() {
+                       handleDeleteStrategy(this.dataset.id);
+                   });
+                   strategyItemEl.querySelector('.toggle-strategy-active-btn').addEventListener('click', function() {
+                       handleToggleStrategyActive(this.dataset.id, this.dataset.action);
+                   });
+               });
+           }
+       } catch (error) {
+           console.error('[DEBUG] loadAndDisplayCustomStrategies (panel): Error caught:', error.message, error.stack);
+           container.innerHTML = `<p style="color: var(--danger); text-align: center; padding: 10px;">Failed to load strategies: ${error.message}</p>`;
+       }
+   }
 
-            // Placeholder functions for handleEditStrategy and handleDeleteStrategy
-            // These need to be accessible globally or within the scope where event listeners are added.
-            // Defining them on `window` makes them globally accessible.
-            if (typeof window.handleEditStrategy === 'undefined') {
-                window.handleEditStrategy = function(strategyId) {
-                    console.log("Edit strategy clicked for ID:", strategyId);
-                    // Implementation will be part of Step 3: show strategy builder with this strategy's data.
-                    alert("Edit functionality will be implemented in the next step.");
-                };
-            }
-            if (typeof window.handleDeleteStrategy === 'undefined') {
-                window.handleDeleteStrategy = async function(strategyId) {
-                    console.log("Delete strategy clicked for ID:", strategyId);
-                    // Basic implementation for now, will be refined in Step 3
-                    if (confirm('Are you sure you want to delete this strategy?')) {
-                        // Actual deletion logic will be in Step 3.
-                        alert("Delete functionality (calling backend) will be implemented in Step 3. For now, it will just reload the list.");
-                        // Temporarily, just reload the list to simulate removal if backend was called.
-                        loadAndDisplayCustomStrategies();
-                    }
-                };
-            }
+            // Modify navStrategiesBtn event listener to call loadAndDisplayCustomStrategies
+            // The navStrategiesBtn listener was updated in the previous step (Subtask 3 of this Stage)
+            // to open the modal for new strategy creation. It no longer uses showView.
+            // The old logic that directly manipulated styles for strategiesView is confirmed removed.
 
-            // The existing `DOMContentLoaded` listener already has a section for `navStrategiesBtn`.
-            // The `showView` function (called by navStrategiesBtn click) handles calling `loadAndDisplayCustomStrategies`.
-            // This is the preferred way. The original direct listener for navStrategiesBtn in the prompt might be simplified
-            // to just call showView('strategiesView').
-            // For now, ensuring showView correctly calls loadAndDisplayCustomStrategies is key, which it does.
-            // The prompt's note on navStrategiesBtn: "This existing listener is fine." (referring to the one in DOMContentLoaded)
-            // The listener in DOMContentLoaded is:
-            // if (navStrategiesBtn) {
-            //     navStrategiesBtn.addEventListener('click', function() {
-            //         if (dashboardView) dashboardView.style.display = 'none';
-            //         if (strategiesView) {
-            //             strategiesView.style.display = 'block';
-            //             loadAndDisplayCustomStrategies(); // This is correctly called here
-            //         } else {
-            //             console.warn("strategiesView element not found for display. Cannot load strategies.");
-            //         }
-            //         console.log("Switched to Strategies View");
-            //     });
-            // }
-            // This is fine as per the prompt.
-
-            // --- Strategy CRUD and Navigation Logic START ---
-
-            // Wire up "Create New Strategy" button
-            const createNewStrategyBtn = document.getElementById('createNewStrategyBtn');
-            if (createNewStrategyBtn) {
-                createNewStrategyBtn.addEventListener('click', function() {
-                    document.getElementById('strategyBuilderTitle').textContent = 'Create New Strategy';
-                    document.getElementById('strategyIdInput').value = ''; // Clear ID for new strategy
-                    document.getElementById('strategyNameInput').value = '';
-                    document.getElementById('strategyDescriptionInput').value = '';
-                    // Reset condition and action fields to default
-                    document.querySelector('#conditionsContainer .condition-indicator').selectedIndex = 0;
-                    document.querySelector('#conditionsContainer .condition-operator').selectedIndex = 0;
-                    document.querySelector('#conditionsContainer .condition-value').value = '';
-                    document.querySelector('#actionsContainer .action-type').selectedIndex = 0;
-                    document.querySelector('#actionsContainer .action-details').value = '';
-                    document.getElementById('strategyIsActiveInput').checked = true; // Default to active
-                    showView('strategyBuilderView');
-                });
-            }
-
-            // Wire up "Cancel Strategy" button
-            const cancelStrategyBtn = document.getElementById('cancelStrategyBtn');
-            if (cancelStrategyBtn) {
-                cancelStrategyBtn.addEventListener('click', function() {
-                    showView('strategiesView'); // Go back to the list
-                });
-            }
-
-            // Implement handleEditStrategy
-            window.handleEditStrategy = async function(strategyId) {
-                console.log("Attempting to edit strategy ID:", strategyId);
-                try {
-                    const response = await fetch(`/api/strategies/${strategyId}`);
-                    if (!response.ok) {
-                        throw new Error(`Failed to fetch strategy: ${response.status}`);
-                    }
-                    const strategy = await response.json();
-
-                    document.getElementById('strategyBuilderTitle').textContent = 'Edit Strategy';
-                    document.getElementById('strategyIdInput').value = strategy.strategy_id;
-                    document.getElementById('strategyNameInput').value = strategy.strategy_name || '';
-                    document.getElementById('strategyDescriptionInput').value = strategy.description || '';
-                    document.getElementById('strategyIsActiveInput').checked = strategy.is_active === undefined ? true : strategy.is_active;
-
-                    const conditionsGroup = strategy.conditions_group;
-                    if (conditionsGroup && conditionsGroup.conditions && conditionsGroup.conditions.length > 0) {
-                        const firstCondition = conditionsGroup.conditions[0];
-                        document.querySelector('#conditionsContainer .condition-indicator').value = firstCondition.indicator || 'RSI';
-                        document.querySelector('#conditionsContainer .condition-operator').value = firstCondition.operator || '<';
-                        document.querySelector('#conditionsContainer .condition-value').value = firstCondition.value || '';
-                    } else {
-                        document.querySelector('#conditionsContainer .condition-indicator').selectedIndex = 0;
-                        document.querySelector('#conditionsContainer .condition-operator').selectedIndex = 0;
-                        document.querySelector('#conditionsContainer .condition-value').value = '';
-                    }
-
-                    if (strategy.actions && strategy.actions.length > 0) {
-                        const firstAction = strategy.actions[0];
-                        document.querySelector('#actionsContainer .action-type').value = firstAction.type || 'BUY';
-                        document.querySelector('#actionsContainer .action-details').value = firstAction.details || '';
-                    } else {
-                        document.querySelector('#actionsContainer .action-type').selectedIndex = 0;
-                        document.querySelector('#actionsContainer .action-details').value = '';
-                    }
-                    showView('strategyBuilderView');
-                } catch (error) {
-                    console.error('Error fetching strategy for editing:', error);
-                    alert('Could not load strategy data for editing. Please try again.');
-                }
-            };
-
-            // Implement handleDeleteStrategy
-            window.handleDeleteStrategy = async function(strategyId) {
-                console.log("Attempting to delete strategy ID:", strategyId);
-                if (confirm('Are you sure you want to delete this strategy? This action cannot be undone.')) {
-                    try {
-                        const response = await fetch(`/api/strategies/${strategyId}`, {
-                            method: 'DELETE',
-                        });
-                        if (!response.ok) {
-                            const errorData = await response.json().catch(() => ({ detail: 'Unknown error during deletion.' }));
-                            throw new Error(`Failed to delete strategy: ${response.status} - ${errorData.detail || errorData.error || 'Server error'}`);
-                        }
-                        console.log('Strategy deleted successfully');
-                        alert('Strategy deleted successfully.');
-                        loadAndDisplayCustomStrategies();
-                    } catch (error) {
-                        console.error('Error deleting strategy:', error);
-                        alert(`Could not delete strategy: ${error.message}`);
-                    }
-                }
-            };
-
-            // Implement "Save Strategy" logic
-            const saveStrategyBtn = document.getElementById('saveStrategyBtn');
-            if (saveStrategyBtn) {
-                saveStrategyBtn.addEventListener('click', async function() {
-                    const strategyId = document.getElementById('strategyIdInput').value;
-                    const strategyName = document.getElementById('strategyNameInput').value.trim();
-                    const strategyDescription = document.getElementById('strategyDescriptionInput').value.trim();
-                    const isActive = document.getElementById('strategyIsActiveInput').checked;
-
-                    if (!strategyName) {
-                        alert('Strategy Name is required.');
-                        return;
-                    }
-
-                    const conditionIndicator = document.querySelector('#conditionsContainer .condition-indicator').value;
-                    const conditionOperator = document.querySelector('#conditionsContainer .condition-operator').value;
-                    const conditionValue = document.querySelector('#conditionsContainer .condition-value').value.trim();
-
-                    let conditionsGroup = {
-                        logical_operator: 'AND',
-                        conditions: []
-                    };
-                    if (conditionIndicator && conditionOperator && conditionValue) {
-                         conditionsGroup.conditions.push({
-                             indicator: conditionIndicator,
-                             operator: conditionOperator,
-                             value: conditionValue
-                         });
-                    }
-
-                    const actionType = document.querySelector('#actionsContainer .action-type').value;
-                    const actionDetails = document.querySelector('#actionsContainer .action-details').value.trim();
-
-                    let actions = [];
-                    if (actionType) {
-                         actions.push({
-                             type: actionType,
-                             details: actionDetails
-                         });
-                    }
-
-                    const strategyPayload = {
-                        strategy_name: strategyName,
-                        description: strategyDescription,
-                        conditions_group: conditionsGroup,
-                        actions: actions,
-                        is_active: isActive // Add this line
-                    };
-
-                    let url = '/api/strategies';
-                    let method = 'POST';
-
-                    if (strategyId) {
-                        url = `/api/strategies/${strategyId}`;
-                        method = 'PUT';
-                        strategyPayload.strategy_id = strategyId;
-                    }
-
-                    console.log(`Saving strategy (${method}). URL: ${url}, Payload:`, JSON.stringify(strategyPayload));
-
-                    try {
-                        const response = await fetch(url, {
-                            method: method,
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(strategyPayload)
-                        });
-
-                        if (!response.ok) {
-                            const errorData = await response.json().catch(() => ({ detail: 'Unknown error during save.' }));
-                            throw new Error(`Failed to save strategy: ${response.status} - ${errorData.detail || errorData.error || 'Server error'}`);
-                        }
-
-                        const savedStrategy = await response.json();
-                        console.log('Strategy saved successfully:', savedStrategy);
-                        alert('Strategy saved successfully!');
-                        showView('strategiesView');
-                        loadAndDisplayCustomStrategies();
-                    } catch (error) {
-                        console.error('Error saving strategy:', error);
-                        alert(`Could not save strategy: ${error.message}`);
-                    }
-                });
-            }
-            // --- Strategy CRUD and Navigation Logic END ---
-
-            // --- Function to Toggle Strategy Active State ---
-            window.handleToggleStrategyActive = async function(strategyId, action) {
-                console.log(`Attempting to ${action} strategy ID: ${strategyId}`);
-                const url = `/api/strategies/${strategyId}/${action}`; // action is 'enable' or 'disable'
-                let friendlyAction = action.charAt(0).toUpperCase() + action.slice(1); // Capitalize
-
-                try {
-                    const response = await fetch(url, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                    });
-
-                    if (!response.ok) {
-                        const errorData = await response.json().catch(() => ({ detail: `Unknown error during ${action}.` }));
-                        throw new Error(`Failed to ${action} strategy: ${response.status} - ${errorData.detail || errorData.error || 'Server error'}`);
-                    }
-
-                    const updatedStrategy = await response.json();
-                    console.log(`Strategy ${action}d successfully:`, updatedStrategy);
-                    alert(`Strategy successfully ${action}d.`);
-
-                    if (typeof loadAndDisplayCustomStrategies === 'function') {
-                        loadAndDisplayCustomStrategies();
-                    }
-
-                } catch (error) {
-                    console.error(`Error ${action}ing strategy:`, error);
-                    alert(`Could not ${action} strategy: ${error.message}`);
-                }
-            };
-
+            loadAndDisplayCustomStrategies(); // Populate the panel on page load
         });
+
+        window.openStrategyModalForEdit = async function(strategyId) {
+            console.log('[DEBUG] openStrategyModalForEdit called for ID:', strategyId);
+            if (!strategyId) return;
+            try {
+                const response = await fetch(`/api/strategies/${strategyId}`);
+                if (!response.ok) throw new Error(`Failed to fetch strategy: ${response.status}`);
+                const strategy = await response.json();
+
+                if(strategyModalTitle) strategyModalTitle.textContent = 'Edit Strategy';
+                if(strategyModalIdInput) strategyModalIdInput.value = strategy.strategy_id;
+                if(strategyModalNameInput) strategyModalNameInput.value = strategy.strategy_name || '';
+                if(strategyModalDescriptionInput) strategyModalDescriptionInput.value = strategy.description || '';
+                if(strategyModalIsActiveInput) strategyModalIsActiveInput.checked = strategy.is_active === undefined ? true : strategy.is_active;
+
+                if (strategy.conditions_group && strategy.conditions_group.conditions && strategy.conditions_group.conditions.length > 0) {
+                    const cond = strategy.conditions_group.conditions[0];
+                    if(strategyModalConditionIndicator) strategyModalConditionIndicator.value = cond.indicator || 'RSI';
+                    if(strategyModalConditionOperator) strategyModalConditionOperator.value = cond.operator || '<';
+                    if(strategyModalConditionValue) strategyModalConditionValue.value = cond.value || '';
+                } else {
+                    if(strategyModalConditionIndicator) strategyModalConditionIndicator.selectedIndex = 0;
+                    if(strategyModalConditionOperator) strategyModalConditionOperator.selectedIndex = 0;
+                    if(strategyModalConditionValue) strategyModalConditionValue.value = '';
+                }
+                if (strategy.actions && strategy.actions.length > 0) {
+                    const act = strategy.actions[0];
+                    if(strategyModalActionType) strategyModalActionType.value = act.type || 'BUY';
+                    if(strategyModalActionDetails) strategyModalActionDetails.value = act.details || '';
+                } else {
+                    if(strategyModalActionType) strategyModalActionType.selectedIndex = 0;
+                    if(strategyModalActionDetails) strategyModalActionDetails.value = '';
+                }
+                openModal();
+            } catch (error) {
+                console.error('Error fetching strategy for modal editing:', error);
+                alert('Could not load strategy data for editing.');
+            }
+        };
         
         // The old, separate saveSettingsBtn listener is removed as its functionality 
         // is now part of the saveAndConnectBtn logic triggered from connectBtn flow.
@@ -2035,5 +1867,6 @@
         // function getDerivApiToken() {
         
     </script>
+</body>
 </body>
 </html>

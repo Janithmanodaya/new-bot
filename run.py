@@ -55,307 +55,6 @@ def save_strategies_to_file():
 load_strategies_from_file()
 # --- End Strategy Management ---
 
-# --- Strategy Evaluation Helper Functions ---
-def get_indicator_values(indicator_name, market_state):
-    """
-    Safely retrieves current and previous values for a given indicator from market_state.
-    Returns (current_value, previous_value) or (None, None) if not available.
-    For 'PRICE', it checks current_chart_type to decide between tick prices or candle close.
-    """
-    indicator_key_map = {
-        'RSI': 'rsi',
-        'MACD': 'macd', # This is the MACD line. Signal line comparison is more complex.
-        'STOCH': 'stochastic', # Stochastic %K
-        'CCI': 'cci_20', # Assuming CCI20 specifically
-        'EMA10': 'ema_10',
-        'EMA20': 'ema_20',
-        'EMA30': 'ema_30',
-        'EMA50': 'ema_50',
-        'EMA100': 'ema_100',
-        'EMA200': 'ema_200',
-        # Add other SMAs if needed, e.g., 'SMA50': 'sma_50'
-    }
-
-    current_value = None
-    previous_value = None
-
-    if indicator_name == 'PRICE':
-        source_data = None
-        if market_state.get('current_chart_type') == 'ohlcv' and market_state.get('ohlcv_candles'):
-            source_data = [c['close'] for c in market_state['ohlcv_candles'] if isinstance(c, dict) and 'close' in c]
-        elif market_state.get('current_chart_type') == 'tick' and market_state.get('prices'):
-            source_data = market_state['prices']
-
-        if source_data and len(source_data) > 0:
-            current_value = source_data[-1]
-        if source_data and len(source_data) > 1:
-            previous_value = source_data[-2]
-
-    elif indicator_name in indicator_key_map:
-        key = indicator_key_map[indicator_name]
-        if market_state.get(key) and isinstance(market_state[key], list) and len(market_state[key]) > 0:
-            current_value = market_state[key][-1]
-        if market_state.get(key) and isinstance(market_state[key], list) and len(market_state[key]) > 1:
-            previous_value = market_state[key][-2]
-    else:
-        logging.warning(f"[ConditionCheck] Unknown indicator specified: {indicator_name}")
-        return None, None
-
-    # Ensure values are floats if not None
-    try:
-        current_value = float(current_value) if current_value is not None else None
-        previous_value = float(previous_value) if previous_value is not None else None
-    except (ValueError, TypeError):
-        logging.error(f"[ConditionCheck] Could not convert indicator values to float for {indicator_name}. Current: {current_value}, Prev: {previous_value}")
-        return None, None
-
-    return current_value, previous_value
-
-def check_single_condition(condition_item, market_state):
-    """
-    Evaluates a single strategy condition.
-    condition_item (dict): e.g., {"indicator": "RSI", "operator": "<", "value": "30"}
-                            or {"indicator": "PRICE", "operator": "CROSS_ABOVE", "value": "EMA50"}
-    market_state (dict): A snapshot of the current market_data.
-    Returns: True if condition is met, False otherwise.
-    """
-    indicator_name = condition_item.get('indicator')
-    operator = condition_item.get('operator')
-    target_value_str = str(condition_item.get('value', '')).strip() # Ensure it's a string and stripped
-
-    if not all([indicator_name, operator, target_value_str]):
-        logging.warning(f"[ConditionCheck] Invalid condition item (missing fields): {condition_item}")
-        return False
-
-    current_lhs, prev_lhs = get_indicator_values(indicator_name, market_state)
-
-    if current_lhs is None:
-        logging.debug(f"[ConditionCheck] LHS current value for '{indicator_name}' not available or not numeric. Condition false.")
-        return False
-
-    # Determine RHS value: either a numeric literal or another indicator's value
-    current_rhs, prev_rhs = None, None
-    # Check against uppercase for robust matching of indicator names
-    is_rhs_indicator = target_value_str.upper() in [k.upper() for k in get_indicator_values.__globals__['indicator_key_map'].keys()] \
-                       or target_value_str.upper() == 'PRICE'
-
-
-    if is_rhs_indicator:
-        current_rhs, prev_rhs = get_indicator_values(target_value_str.upper(), market_state)
-        if current_rhs is None:
-            logging.debug(f"[ConditionCheck] RHS indicator '{target_value_str}' value not available. Condition false.")
-            return False
-    else: # RHS is a literal value
-        try:
-            current_rhs = float(target_value_str)
-            # prev_rhs remains None as it's not needed for literal comparisons unless operator implies it (not common)
-        except ValueError:
-            logging.warning(f"[ConditionCheck] Invalid numeric target value in condition: {target_value_str}")
-            return False
-
-    logging.debug(f"[ConditionCheck] Evaluating: {indicator_name} ({current_lhs}, prev:{prev_lhs}) {operator} {target_value_str} (RHS current:{current_rhs}, prev:{prev_rhs})")
-
-    # Simple comparisons (evaluate current_lhs against current_rhs)
-    if operator == '<':
-        return current_lhs < current_rhs
-    elif operator == '<=':
-        return current_lhs <= current_rhs
-    elif operator == '==':
-        # Floating point comparisons need tolerance, but for now direct.
-        # Consider np.isclose for more robust float equality if needed.
-        return current_lhs == current_rhs
-    elif operator == '>=':
-        return current_lhs >= current_rhs
-    elif operator == '>':
-        return current_lhs > current_rhs
-
-    # Crossover comparisons (require previous values for both LHS and RHS)
-    elif operator == 'CROSS_ABOVE':
-        # For RHS literal, prev_rhs effectively becomes current_rhs
-        if not is_rhs_indicator:
-            prev_rhs = current_rhs
-
-        if prev_lhs is None or prev_rhs is None:
-            if is_rhs_indicator and prev_rhs is None:
-                logging.debug(f"[ConditionCheck] CROSS_ABOVE: Previous RHS value for '{target_value_str}' not available.")
-            elif prev_lhs is None:
-                logging.debug(f"[ConditionCheck] CROSS_ABOVE: Previous LHS value for '{indicator_name}' not available.")
-            # If RHS is literal, prev_rhs is already set to current_rhs, so this path for prev_rhs being None won't be hit unless current_rhs was None (handled earlier)
-            return False
-
-        # Condition: prev_lhs <= prev_rhs AND current_lhs > current_rhs
-        return prev_lhs <= prev_rhs and current_lhs > current_rhs
-
-    elif operator == 'CROSS_BELOW':
-        if not is_rhs_indicator:
-            prev_rhs = current_rhs
-
-        if prev_lhs is None or prev_rhs is None:
-            if is_rhs_indicator and prev_rhs is None:
-                logging.debug(f"[ConditionCheck] CROSS_BELOW: Previous RHS value for '{target_value_str}' not available.")
-            elif prev_lhs is None:
-                logging.debug(f"[ConditionCheck] CROSS_BELOW: Previous LHS value for '{indicator_name}' not available.")
-            return False
-
-        # Condition: prev_lhs >= prev_rhs AND current_lhs < current_rhs
-        return prev_lhs >= prev_rhs and current_lhs < current_rhs
-
-    else:
-        logging.warning(f"[ConditionCheck] Unknown operator in condition: {operator}")
-        return False
-
-def trigger_strategy_actions(strategy, current_market_state):
-    """
-    Executes the actions defined in a strategy.
-    strategy (dict): The strategy object whose conditions were met.
-    current_market_state (dict): The market data snapshot at the time of condition evaluation.
-                                  Used to fetch current price for simulated trades.
-    """
-    strategy_name = strategy.get('strategy_name', strategy.get('strategy_id', 'Unknown Strategy'))
-    actions = strategy.get('actions', [])
-
-    if not actions:
-        logging.info(f"[ActionTrigger] No actions defined for strategy '{strategy_name}'.")
-        return
-
-    logging.info(f"[ActionTrigger] Executing actions for strategy '{strategy_name}'...")
-
-    # Determine current price for trade simulations
-    # This relies on get_indicator_values being able to fetch 'PRICE'
-    current_price, _ = get_indicator_values('PRICE', current_market_state)
-    if current_price is None:
-        logging.warning(f"[ActionTrigger] Could not determine current price for SYMBOL '{SYMBOL}'. Trade simulations might be affected.")
-        # Fallback or decide if actions like BUY/SELL should proceed without a known price.
-        # For simulation, logging 'N/A' for price is okay.
-
-    for action_item in actions:
-        action_type = action_item.get('type')
-        action_details_str = action_item.get('details', '') # Details like amount, email address, etc.
-
-        logging.info(f"[ActionTrigger] Processing action: {action_type}, Details: '{action_details_str}' for strategy '{strategy_name}'")
-
-        if action_type == 'NOTIFY_ALERT':
-            # Log to console/server log. Frontend alert would require WebSocket push or different mechanism.
-            log_message = f"ALERT from strategy '{strategy_name}': Symbol {SYMBOL}, Details: {action_details_str} (Current Price: {current_price if current_price is not None else 'N/A'})"
-            logging.info(log_message) # Main log
-            print(f"STRATEGY_ALERT: {log_message}") # Also print for more visibility if running locally
-
-        elif action_type == 'NOTIFY_EMAIL':
-            # Simulate email notification by logging.
-            # Actual email sending would require SMTP setup, email libraries, templates, etc.
-            recipient = action_details_str if action_details_str else "default_recipient@example.com"
-            log_message = f"SIMULATED EMAIL to {recipient} from strategy '{strategy_name}': Symbol {SYMBOL}, Details: (Further details from strategy/market state could be included here). Current Price: {current_price if current_price is not None else 'N/A'}."
-            logging.info(log_message)
-            print(f"STRATEGY_EMAIL_SIM: {log_message}")
-
-
-        elif action_type == 'BUY':
-            # Simulate a BUY order. Actual trading needs Deriv API integration for 'buy' call.
-            # action_details might contain stake amount, contract type, etc.
-            stake = action_details_str if action_details_str else "default_stake" # Example
-            log_message = f"SIMULATED TRADE (BUY): Strategy '{strategy_name}', Symbol: {SYMBOL}, Price: {current_price if current_price is not None else 'N/A'}, Stake/Details: {stake}"
-            logging.info(log_message)
-            print(f"STRATEGY_TRADE_SIM: {log_message}")
-
-            # Placeholder for actual trade execution logic using Deriv API
-            # proposal_payload = { ... }
-            # proposal_data, proposal_error = send_ws_request_and_wait('trade_proposal', proposal_payload)
-            # if proposal_data:
-            #     buy_payload = { "buy": proposal_data['proposal']['id'], "price": proposal_data['proposal']['ask_price'] }
-            #     buy_data, buy_error = send_ws_request_and_wait('trade_buy', buy_payload)
-            #     if buy_data: logging.info(f"Actual BUY executed: {buy_data}")
-            #     else: logging.error(f"Actual BUY failed: {buy_error}")
-            # else: logging.error(f"Trade proposal failed for BUY action: {proposal_error}")
-
-
-        elif action_type == 'SELL':
-            # Simulate a SELL order.
-            stake = action_details_str if action_details_str else "default_stake" # Example
-            log_message = f"SIMULATED TRADE (SELL): Strategy '{strategy_name}', Symbol: {SYMBOL}, Price: {current_price if current_price is not None else 'N/A'}, Stake/Details: {stake}"
-            logging.info(log_message)
-            print(f"STRATEGY_TRADE_SIM: {log_message}")
-
-            # Placeholder for actual trade execution logic (similar to BUY)
-
-        else:
-            logging.warning(f"[ActionTrigger] Unknown action type '{action_type}' in strategy '{strategy_name}'.")
-
-def evaluate_strategies():
-    """
-    Main function to iterate through all custom strategies, evaluate their conditions,
-    and trigger actions if all conditions for a strategy are met.
-    """
-    active_strategies = {}
-    with strategies_lock:
-        if not custom_strategies:
-            # logging.debug("[StrategyEval] No custom strategies to evaluate.")
-            return
-        # Create a copy to iterate over in case strategies are modified concurrently (less likely here)
-        active_strategies = copy.deepcopy(custom_strategies)
-
-    current_market_state_snapshot = {}
-    with market_data_lock:
-        # Create a deepcopy for consistent view of market data during this evaluation cycle
-        current_market_state_snapshot = copy.deepcopy(market_data)
-
-    # Basic check: Do we have any price data to evaluate against?
-    # This check can be made more specific based on strategy requirements (e.g., specific indicators ready)
-    if not current_market_state_snapshot.get('prices') and not current_market_state_snapshot.get('ohlcv_candles'):
-        logging.debug("[StrategyEval] Market data (prices/candles) not yet sufficient for evaluation.")
-        return
-
-    # Add current_chart_type to the snapshot for check_single_condition if it's not already there
-    # It's added to market_data by /api/market_data but not intrinsically part of core market_data updates.
-    # For robustness, let's ensure it's available for get_indicator_values.
-    if 'current_chart_type' not in current_market_state_snapshot:
-        global current_chart_type # Access the global
-        current_market_state_snapshot['current_chart_type'] = current_chart_type
-        logging.debug(f"[StrategyEval] Added global current_chart_type ('{current_chart_type}') to market_state_snapshot.")
-
-
-    # logging.debug(f"[StrategyEval] Starting evaluation for {len(active_strategies)} strategies against symbol {SYMBOL}.")
-
-    for strategy_id, strategy in active_strategies.items():
-        strategy_name = strategy.get('strategy_name', strategy_id)
-
-        if not strategy.get('is_active', True): # Check if strategy is active
-            # logging.debug(f"[StrategyEval] Strategy '{strategy_name}' is not active. Skipping.")
-            continue
-
-        # TODO: Future: Check if strategy is applicable to the current SYMBOL
-
-        conditions_group = strategy.get('conditions_group')
-        if not conditions_group or not conditions_group.get('conditions'):
-            # logging.debug(f"[StrategyEval] Strategy '{strategy_name}' has no conditions. Skipping.")
-            continue
-
-        all_conditions_met = True # Assuming AND logic for conditions in the group
-
-        # logging.debug(f"[StrategyEval] Evaluating strategy '{strategy_name}'...")
-        for condition_item in conditions_group['conditions']:
-            try:
-                condition_met = check_single_condition(condition_item, current_market_state_snapshot)
-                if not condition_met:
-                    all_conditions_met = False
-                    # logging.debug(f"[StrategyEval] Condition {condition_item} for '{strategy_name}' not met. Stopping evaluation for this strategy.")
-                    break # For AND logic, if one condition fails, the group fails
-            except Exception as e:
-                logging.error(f"[StrategyEval] Error checking condition {condition_item} for strategy '{strategy_name}': {e}", exc_info=True)
-                all_conditions_met = False
-                break # Error in condition checking, treat as not met
-
-        if all_conditions_met:
-            logging.info(f"[StrategyEval] All conditions met for strategy '{strategy_name}'.")
-            try:
-                trigger_strategy_actions(strategy, current_market_state_snapshot)
-            except Exception as e:
-                logging.error(f"[StrategyEval] Error triggering actions for strategy '{strategy_name}': {e}", exc_info=True)
-        # else:
-            # logging.debug(f"[StrategyEval] Not all conditions met for strategy '{strategy_name}'.")
-    # logging.debug("[StrategyEval] Finished strategy evaluation cycle.")
-# --- End Strategy Evaluation Helper Functions ---
-
-
 
 # Global variables for request tracking
 next_req_id = 1
@@ -877,13 +576,6 @@ def on_message_for_deriv(ws, message):
                         if isinstance(value, list): market_data[key] = value 
                         elif isinstance(value, str): market_data[key] = value
 
-                # <<< Call evaluate_strategies after indicators are updated >>>
-                if ws.keep_running: # Check if WebSocket is still supposed to be running
-                    try:
-                        evaluate_strategies()
-                    except Exception as e:
-                        logging.error(f"[StrategyEvalLoop] Error during evaluate_strategies from tick: {e}", exc_info=True)
-
     elif msg_type == 'candles':
         raw_candles_list = data.get('candles', [])
         request_info = None
@@ -922,20 +614,14 @@ def on_message_for_deriv(ws, message):
                     logging.info(f"OHLCV data received (req_id: {req_id_of_message}, type: {request_type_str}), recalculating all indicators using these candles.")
                     # prices_for_recalc = [c['close'] for c in parsed_ohlcv_candles] # Old way
                     if parsed_ohlcv_candles: # parsed_ohlcv_candles is the list of dicts
-                        updated_data_from_ohlcv = calculate_indicators(parsed_ohlcv_candles) # Use the new candles
-                        for key, value in updated_data_from_ohlcv.items():
-                            if key in market_data:
-                                if isinstance(value, list): market_data[key] = value
-                                elif isinstance(value, str): market_data[key] = value
-
-                        # <<< Call evaluate_strategies after indicators are updated from new candles >>>
-                        if ws.keep_running: # Check if WebSocket is still supposed to be running
-                            try:
-                                evaluate_strategies()
-                            except Exception as e:
-                                logging.error(f"[StrategyEvalLoop] Error during evaluate_strategies from candles: {e}", exc_info=True)
+                        updated_data_from_ohlcv = calculate_indicators(parsed_ohlcv_candles)
+                        with market_data_lock:
+                            for key, value in updated_data_from_ohlcv.items():
+                                if key in market_data: # Ensure key exists in DEFAULT_MARKET_DATA
+                                    if isinstance(value, list): market_data[key] = value
+                                    elif isinstance(value, str): market_data[key] = value
                         logging.info(f"All indicators recalculated using new OHLCV data (req_id: {req_id_of_message}, type: {request_type_str}). ATR: {'Yes' if 'atr_14' in updated_data_from_ohlcv and updated_data_from_ohlcv['atr_14'] else 'No/Empty'}")
-            else: # This else is for if not parsed_ohlcv_candles
+            else:
                 logging.warning(f"No candle data in 'ohlcv_chart_data' response (req_id: {req_id_of_message}).")
 
         elif request_type_str == 'daily_summary_data':
@@ -1447,8 +1133,6 @@ def create_strategy():
             "description": strategy_data.get("description", ""),
             "conditions_group": strategy_data.get("conditions_group"),
             "actions": strategy_data.get("actions", []),
-            "is_active": strategy_data.get("is_active", True), # Defaults to True
-            "status_message": strategy_data.get("status_message", "Active"), # Default status
             "created_at": datetime.now(timezone.utc).isoformat(),
             "updated_at": datetime.now(timezone.utc).isoformat()
         }
@@ -1494,8 +1178,6 @@ def update_strategy(strategy_id):
         existing_strategy["description"] = strategy_updates.get("description", existing_strategy["description"])
         existing_strategy["conditions_group"] = strategy_updates.get("conditions_group", existing_strategy["conditions_group"])
         existing_strategy["actions"] = strategy_updates.get("actions", existing_strategy["actions"])
-        existing_strategy["is_active"] = strategy_updates.get("is_active", existing_strategy.get("is_active", True))
-        existing_strategy["status_message"] = strategy_updates.get("status_message", existing_strategy.get("status_message", ""))
         existing_strategy["updated_at"] = datetime.now(timezone.utc).isoformat()
         
         custom_strategies[strategy_id] = existing_strategy
@@ -1518,37 +1200,3 @@ def delete_strategy(strategy_id):
     save_strategies_to_file()
     logging.info(f"Deleted strategy with ID: {strategy_id}, Name: {deleted_strategy_name}")
     return jsonify({"message": "Strategy deleted successfully"}), 200
-
-@app.route('/api/strategies/<strategy_id>/enable', methods=['POST'])
-def enable_strategy(strategy_id):
-    global custom_strategies
-    with strategies_lock:
-        if strategy_id not in custom_strategies:
-            logging.warning(f"Strategy with ID {strategy_id} not found (enable).")
-            return jsonify({"error": "Strategy not found"}), 404
-
-        custom_strategies[strategy_id]['is_active'] = True
-        custom_strategies[strategy_id]['status_message'] = "Active"
-        custom_strategies[strategy_id]['updated_at'] = datetime.now(timezone.utc).isoformat()
-        strategy = custom_strategies[strategy_id]
-
-    save_strategies_to_file()
-    logging.info(f"Enabled strategy ID: {strategy_id}, Name: {strategy.get('strategy_name')}")
-    return jsonify(strategy)
-
-@app.route('/api/strategies/<strategy_id>/disable', methods=['POST'])
-def disable_strategy(strategy_id):
-    global custom_strategies
-    with strategies_lock:
-        if strategy_id not in custom_strategies:
-            logging.warning(f"Strategy with ID {strategy_id} not found (disable).")
-            return jsonify({"error": "Strategy not found"}), 404
-
-        custom_strategies[strategy_id]['is_active'] = False
-        custom_strategies[strategy_id]['status_message'] = "Disabled by user"
-        custom_strategies[strategy_id]['updated_at'] = datetime.now(timezone.utc).isoformat()
-        strategy = custom_strategies[strategy_id]
-
-    save_strategies_to_file()
-    logging.info(f"Disabled strategy ID: {strategy_id}, Name: {strategy.get('strategy_name')}")
-    return jsonify(strategy)
