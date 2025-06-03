@@ -460,7 +460,7 @@
 <body>
     <div class="container">
         <header>
-            <div class="logo">
+            <div class="logo" id="homeNavLogo" style="cursor: pointer;">
                 <i class="fas fa-chart-line"></i>
                 <h1>Deriv Market Analytics</h1>
             </div>
@@ -491,15 +491,17 @@
                 <button class="btn" id="connectBtn">
                     <i class="fas fa-plug"></i> Connect to API
                 </button>
-                <button class="btn btn-outline">
+                <button class="btn btn-outline" id="navStrategiesBtn"><i class="fas fa-list-alt"></i> My Strategies</button>
+                <button class="btn btn-outline" id="settingsCogBtn"> {/* Added ID here */}
                     <i class="fas fa-cog"></i> Settings
                 </button>
             </div>
         </header>
         
-        <div class="dashboard">
-            <div class="main-content">
-                <div class="chart-container">
+        <div id="dashboardView"> <!-- Dashboard View START -->
+          <div class="dashboard">
+              <div class="main-content">
+                  <div class="chart-container">
                     <div class="chart-header" style="display: flex; justify-content: space-between; align-items: center;">
                         <div class="chart-title">Market Price - USD/JPY</div>
                         <div style="display: flex; align-items: center;"> <!-- Wrapper for selectors -->
@@ -1354,11 +1356,43 @@
 
             // Settings modal elements
             const settingsModal = document.getElementById('settingsModal');
-            const settingsCogBtn = document.querySelector('.btn-outline'); // The actual settings button with cog icon
+            const settingsCogBtn = document.getElementById('settingsCogBtn'); // Use new ID
             const closeSettingsBtn = document.getElementById('closeSettings');
-            const saveAndConnectBtn = document.getElementById('saveSettingsBtn'); // This button saves and attempts connection
+            const saveAndConnectBtn = document.getElementById('saveSettingsBtn');
             const derivApiTokenInput = document.getElementById('derivApiToken');
             const settingsSavedMsg = document.getElementById('settingsSavedMsg');
+
+            // View Switching Elements
+            const dashboardView = document.getElementById('dashboardView');
+            const strategiesView = document.getElementById('strategiesView');
+            const strategyBuilderView = document.getElementById('strategyBuilderView'); // Added
+            const navStrategiesBtn = document.getElementById('navStrategiesBtn');
+            const homeNavLogo = document.getElementById('homeNavLogo');
+            const createNewStrategyBtn = document.getElementById('createNewStrategyBtn'); // Added
+
+            const mainViews = ['dashboardView', 'strategiesView', 'strategyBuilderView'];
+
+            function showView(viewIdToShow) {
+                mainViews.forEach(viewId => {
+                    const viewElement = document.getElementById(viewId);
+                    if (viewElement) {
+                        viewElement.style.display = (viewId === viewIdToShow) ? 'block' : 'none';
+                    } else {
+                        // Warn if the view we intend to show, or a primary alternative view, is missing.
+                        if (viewId === viewIdToShow || viewId === 'strategiesView' || viewId === 'strategyBuilderView') {
+                           console.warn(`View element not found: ${viewId}. Ensure its HTML is in index.html.`);
+                        }
+                    }
+                });
+
+                if (viewIdToShow === 'strategiesView' && typeof loadAndDisplayCustomStrategies === 'function') {
+                    loadAndDisplayCustomStrategies();
+                }
+                // Example for future:
+                // if (viewIdToShow === 'strategyBuilderView' && typeof initializeStrategyBuilder === 'function') {
+                //    initializeStrategyBuilder();
+                // }
+            }
 
             function openSettingsModal() {
                 derivApiTokenInput.value = localStorage.getItem('derivApiToken') || '';
@@ -1443,6 +1477,105 @@
                     }
                 });
             }
+
+            // View Switching Logic
+            if (navStrategiesBtn) {
+                navStrategiesBtn.addEventListener('click', function() {
+                    if (dashboardView) dashboardView.style.display = 'none';
+                    if (strategiesView) strategiesView.style.display = 'block';
+                    else console.warn("strategiesView element not found for display.");
+                    // Optional: Add active class styling to navStrategiesBtn and remove from other main nav buttons
+                    console.log("Switched to Strategies View");
+                    // You might want to load strategies here if not loaded automatically
+                    // fetchAndDisplayStrategies();
+                });
+            }
+
+            if (homeNavLogo) {
+                homeNavLogo.addEventListener('click', function() {
+                    if (strategiesView) strategiesView.style.display = 'none';
+                    if (dashboardView) dashboardView.style.display = 'block'; // Assuming 'block' is the correct display style for dashboardView
+                    // Optional: Update active button styling
+                    console.log("Switched to Dashboard View");
+                });
+            }
+
+            // Ensure default view state on load (dashboard visible, strategies hidden)
+            if (dashboardView) dashboardView.style.display = 'block';
+            if (strategiesView) strategiesView.style.display = 'none';
+            else if(navStrategiesBtn) console.warn("strategiesView element not found for initial hide during page load.");
+
+            async function loadAndDisplayCustomStrategies() {
+                const container = document.getElementById('strategiesListContainer');
+                if (!container) {
+                    console.error('strategiesListContainer element not found. Cannot display strategies.');
+                    // If strategiesView itself is missing, this function might not even be called,
+                    // or if it is, this check is the fallback.
+                    return;
+                }
+                container.innerHTML = '<p>Loading strategies...</p>';
+
+                try {
+                    const response = await fetch('/api/strategies');
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                    const strategies = await response.json();
+                    container.innerHTML = ''; // Clear loading message
+
+                    if (strategies.length === 0) {
+                        container.innerHTML = '<p>No strategies found. Click the "Create New Strategy" button to start.</p>'; // TODO: Add create button later
+                    } else {
+                        strategies.forEach(strategy => {
+                            const strategyEl = document.createElement('div');
+                            strategyEl.className = 'strategy-item';
+                            strategyEl.style.border = '1px solid var(--border)';
+                            strategyEl.style.borderRadius = '8px';
+                            strategyEl.style.padding = '15px';
+                            strategyEl.style.marginBottom = '15px';
+
+                            // Basic strategy info
+                            let content = `<h4 style="margin-bottom: 5px;">${strategy.strategy_name}</h4>`;
+                            // The backend currently doesn't store 'symbol' directly in the strategy object.
+                            // This will be undefined unless the strategy_data payload included it.
+                            // For now, we'll display it if present, or omit.
+                            if (strategy.symbol) { // Check if symbol exists
+                               content += `<p style="font-size: 0.9em; color: var(--gray);">Symbol: ${strategy.symbol}</p>`;
+                            }
+                            content += `<p style="font-size: 0.9em; margin-bottom: 10px;">${strategy.description || 'No description.'}</p>`;
+
+                            // Placeholder for conditions and actions - can be more detailed later
+                            content += `<p style="font-size: 0.8em; color: var(--gray);">Conditions: ${JSON.stringify(strategy.conditions_group, null, 2)}</p>`;
+                            content += `<p style="font-size: 0.8em; color: var(--gray); margin-top: 5px;">Actions: ${JSON.stringify(strategy.actions, null, 2)}</p>`;
+
+                            content += `<div style="margin-top: 10px;">
+                                            <button class="btn btn-sm btn-outline-secondary" style="margin-right: 5px; padding: 5px 10px; font-size: 0.8em;">Edit</button>
+                                            <button class="btn btn-sm btn-outline-danger" style="padding: 5px 10px; font-size: 0.8em;">Delete</button>
+                                        </div>`;
+                            strategyEl.innerHTML = content;
+                            container.appendChild(strategyEl);
+                        });
+                    }
+                } catch (error) {
+                    console.error('Failed to load strategies:', error);
+                    container.innerHTML = '<p style="color: var(--danger);">Failed to load strategies. Please try again later.</p>';
+                }
+            }
+
+            // Modify navStrategiesBtn event listener to call loadAndDisplayCustomStrategies
+            if (navStrategiesBtn) {
+                navStrategiesBtn.addEventListener('click', function() {
+                    if (dashboardView) dashboardView.style.display = 'none';
+                    if (strategiesView) {
+                        strategiesView.style.display = 'block';
+                        loadAndDisplayCustomStrategies(); // Call when switching to the view
+                    } else {
+                        console.warn("strategiesView element not found for display. Cannot load strategies.");
+                    }
+                    console.log("Switched to Strategies View");
+                });
+            }
+
         });
         
         // The old, separate saveSettingsBtn listener is removed as its functionality 
@@ -1451,5 +1584,6 @@
         // function getDerivApiToken() {
         
     </script>
+</body>
 </body>
 </html>
