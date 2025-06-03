@@ -139,17 +139,17 @@ current_tick_subscription_id = None
 def calculate_indicators(data_input):
     """
     Calculates various technical indicators.
-
+    
     Args:
         data_input: Can be one of:
             - list[float]: A list of close prices (typically for tick-based calculations).
-            - list[dict]: A list of OHLCV candles, where each dict has
+            - list[dict]: A list of OHLCV candles, where each dict has 
                           {'time', 'open', 'high', 'low', 'close', 'volume'}.
                           Required for ATR calculation.
     Returns:
         dict: A dictionary containing lists of calculated indicator values.
     """
-
+    
     is_ohlcv_data = False
     prices_list = [] # Close prices
     high_prices = []
@@ -164,7 +164,7 @@ def calculate_indicators(data_input):
                 if isinstance(v_default, list): empty_results[k] = []
                 elif isinstance(v_default, str): empty_results[k] = 'N/A'
         return empty_results
-
+    
     # Determine data type (list of floats or list of dicts)
     # This check needs to be careful if data_input is a list that could be empty after filtering
     if isinstance(data_input[0], dict): # OHLCV data
@@ -183,12 +183,12 @@ def calculate_indicators(data_input):
             if not (len(prices_list) == len(high_prices) == len(low_prices)):
                 logging.warning("[Indicators] Mismatch in HLC data lengths from OHLCV input. ATR/CCI might be affected.")
                 # Decide if is_ohlcv_data should be False if H/L are not complete. For ATR, it will fail later if lengths differ.
-
-            close_prices_for_atr = prices_list
+            
+            close_prices_for_atr = prices_list 
             logging.debug(f"calculate_indicators received OHLCV data. Count: {len(data_input)}, Valid close prices: {len(prices_list)}")
         except KeyError as e:
             logging.error(f"[Indicators] OHLCV data missing key: {e}. Cannot calculate all indicators reliably.")
-            is_ohlcv_data = False
+            is_ohlcv_data = False 
             if not prices_list: # If 'close' also failed during extraction
                  return {k: [] if isinstance(DEFAULT_MARKET_DATA[k], list) else 'N/A' for k in DEFAULT_MARKET_DATA if k not in ['timestamps', 'prices', 'volumes', 'ohlcv_candles', 'high_24h', 'low_24h', 'volume_24h']}
     elif isinstance(data_input[0], float): # List of close prices
@@ -198,7 +198,7 @@ def calculate_indicators(data_input):
         logging.error(f"[Indicators] Unknown data_input type: {type(data_input[0] if data_input else 'None')}. Cannot calculate indicators.")
         return {k: [] if isinstance(DEFAULT_MARKET_DATA[k], list) else 'N/A' for k in DEFAULT_MARKET_DATA if k not in ['timestamps', 'prices', 'volumes', 'ohlcv_candles', 'high_24h', 'low_24h', 'volume_24h']}
 
-    if not prices_list:
+    if not prices_list: 
         logging.warning("[Indicators] Price list (derived after type check) is empty. Cannot calculate indicators.")
         return {k: [] if isinstance(DEFAULT_MARKET_DATA[k], list) else 'N/A' for k in DEFAULT_MARKET_DATA if k not in ['timestamps', 'prices', 'volumes', 'ohlcv_candles', 'high_24h', 'low_24h', 'volume_24h']}
 
@@ -250,15 +250,15 @@ def calculate_indicators(data_input):
         high_s = pd.Series(high_prices, dtype=float)
         low_s = pd.Series(low_prices, dtype=float)
         close_s = pd.Series(close_prices_for_atr, dtype=float)
-
+        
         tr = pd.DataFrame()
         tr['h_l'] = high_s - low_s
         tr['h_pc'] = abs(high_s - close_s.shift(1))
         tr['l_pc'] = abs(low_s - close_s.shift(1))
-
+        
         true_range = tr[['h_l', 'h_pc', 'l_pc']].max(axis=1)
         true_range = true_range.fillna(0) # Fill NaN for the first TR value if any (e.g. from shift)
-
+        
         # Wilder's Smoothing for ATR
         # atr = true_range.ewm(alpha=1/ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean()
         # More explicit Wilder's smoothing:
@@ -266,7 +266,7 @@ def calculate_indicators(data_input):
         atr.iloc[ATR_PERIOD-1] = true_range.iloc[:ATR_PERIOD].mean() # Initial ATR is simple average of first N TRs
         for i in range(ATR_PERIOD, len(true_range)):
             atr.iloc[i] = (atr.iloc[i-1] * (ATR_PERIOD - 1) + true_range.iloc[i]) / ATR_PERIOD
-
+            
         results['atr_14'] = atr.fillna(0).tolist() # Fill initial NaNs with 0 or a suitable value
         logging.debug(f"ATR_{ATR_PERIOD} calculated. Length: {len(results['atr_14'])}, Last 5: {results['atr_14'][-5:] if results['atr_14'] else 'N/A'}")
     else:
@@ -275,7 +275,7 @@ def calculate_indicators(data_input):
             logging.debug("ATR calculation skipped: Not OHLCV data.")
         else:
             logging.warning(f"ATR calculation skipped: Insufficient OHLCV data length. Need {ATR_PERIOD}, got {len(high_prices)} H, {len(low_prices)} L, {len(close_prices_for_atr)} C.")
-
+    
     results['atr_volatility_state'] = 'N/A' # Default
     if results.get('atr_14') and len(results['atr_14']) >= ATR_PERIOD: # Need enough ATR values to form SMA of ATR
         atr_series = pd.Series(results['atr_14'])
@@ -283,7 +283,7 @@ def calculate_indicators(data_input):
         if not sma_atr_5.empty and not pd.isna(sma_atr_5.iloc[-1]) and not pd.isna(atr_series.iloc[-1]):
             latest_atr = atr_series.iloc[-1]
             latest_sma_atr = sma_atr_5.iloc[-1]
-
+            
             if latest_atr > latest_sma_atr * 1.5: # Thresholds are examples
                 results['atr_volatility_state'] = 'High'
             elif latest_atr < latest_sma_atr * 0.7:
@@ -301,36 +301,36 @@ def calculate_indicators(data_input):
     # Signal Generation (remains based on close prices and derived indicators)
     if not prices_series.empty: # prices_list was non-empty
         latest_price = prices_series.iloc[-1]
-
+        
         # RSI
         latest_rsi = results['rsi'][-1] if results.get('rsi') and results['rsi'] else 50
         results['rsi_signal'] = 'Buy' if latest_rsi < 30 else ('Sell' if latest_rsi > 70 else 'Neutral')
         results['rsi_prediction_state'] = 'Oversold' if latest_rsi < 30 else ('Overbought' if latest_rsi > 70 else 'Neutral')
-
+        
         # Stochastic
         latest_stochastic = results['stochastic'][-1] if results.get('stochastic') and results['stochastic'] else 50
         results['stochastic_signal'] = 'Buy' if latest_stochastic < 20 else ('Sell' if latest_stochastic > 80 else 'Neutral')
         results['stochastic_prediction_state'] = 'Oversold' if latest_stochastic < 20 else ('Overbought' if latest_stochastic > 80 else 'Neutral')
-
+        
         # MACD
         latest_macd = results['macd'][-1] if results.get('macd') and results['macd'] else 0
         # Signal could also use MACD line vs Signal line cross, but this is simpler: MACD > 0 is bullish.
         results['macd_signal'] = 'Buy' if latest_macd > 0 else ('Sell' if latest_macd < 0 else 'Neutral')
         results['macd_prediction_state'] = 'Bullish' if latest_macd > 0 else ('Bearish' if latest_macd < 0 else 'Neutral')
-
+        
         # CCI
         latest_cci = results['cci_20'][-1] if results.get('cci_20') and results['cci_20'] else 0
         results['cci_signal'] = 'Buy' if latest_cci < -100 else ('Sell' if latest_cci > 100 else 'Neutral')
         results['cci_20_prediction_state'] = 'Oversold' if latest_cci < -100 else ('Overbought' if latest_cci > 100 else 'Neutral')
-
+        
         # Price vs EMA (e.g., EMA50)
         latest_ema_50 = results['ema_50'][-1] if (results.get('ema_50') and results['ema_50']) else latest_price
         results['price_ema_50_signal'] = 'Buy' if latest_price > latest_ema_50 else ('Sell' if latest_price < latest_ema_50 else 'Neutral')
-
+    
     else: # prices_series is empty
         # Set all signals and states to N/A if no price data
         for sig_key in ['rsi_signal', 'stochastic_signal', 'macd_signal', 'cci_signal', 'price_ema_50_signal', 
-                        'rsi_prediction_state', 'stochastic_prediction_state', 'macd_prediction_state',
+                        'rsi_prediction_state', 'stochastic_prediction_state', 'macd_prediction_state', 
                         'cci_20_prediction_state', 'market_sentiment_text', 'atr_volatility_state']:
             results[sig_key] = 'N/A'
     
@@ -421,7 +421,7 @@ def on_message_for_deriv(ws, message):
 
     req_id_of_message = data.get('echo_req', {}).get('req_id')
     request_details = None
-
+    
     if req_id_of_message is not None:
         with shared_data_lock:
             request_details = pending_api_requests.get(req_id_of_message)
@@ -436,13 +436,13 @@ def on_message_for_deriv(ws, message):
             if 'event' in request_details:
                 request_details['error'] = error_details
                 event_to_set = request_details['event']
-
+            
             with shared_data_lock: # Ensure thread-safe removal
                  if req_id_of_message in pending_api_requests:
                     pending_api_requests.pop(req_id_of_message)
-
+        
         logging.error(f"Deriv API Error for req_id {req_id_of_message} (type: {failed_req_type_str}): {error_details}. Full message: {message}")
-
+        
         if event_to_set: # Must be outside lock to prevent deadlock if event waiter tries to acquire lock
             event_to_set.set()
         return
@@ -515,7 +515,7 @@ def on_message_for_deriv(ws, message):
             market_data['prices'].append(tick_price)
             # Cap timestamps and prices for tick chart (e.g., last 200-300 points for performance)
             # This cap should be different from MAX_OHLCV_CANDLES
-            max_tick_points = 300
+            max_tick_points = 300 
             if len(market_data['timestamps']) > max_tick_points:
                 market_data['timestamps'] = market_data['timestamps'][-max_tick_points:]
                 market_data['prices'] = market_data['prices'][-max_tick_points:]
@@ -542,7 +542,7 @@ def on_message_for_deriv(ws, message):
                         market_data['ohlcv_candles'].sort(key=lambda c: c['time'])
                         if len(market_data['ohlcv_candles']) > MAX_OHLCV_CANDLES:
                             market_data['ohlcv_candles'] = market_data['ohlcv_candles'][-MAX_OHLCV_CANDLES:]
-
+                    
                     logging.info(f"Starting new OHLCV candle for interval: {interval_start_time_dt} (granularity: {current_granularity_seconds}s)")
                     in_progress_ohlcv_candle = {
                         'time': interval_start_time_ms, 'open': tick_price, 'high': tick_price,
@@ -553,15 +553,15 @@ def on_message_for_deriv(ws, message):
                     in_progress_ohlcv_candle['high'] = max(in_progress_ohlcv_candle['high'], tick_price)
                     in_progress_ohlcv_candle['low'] = min(in_progress_ohlcv_candle['low'], tick_price)
                     in_progress_ohlcv_candle['close'] = tick_price
-                    in_progress_ohlcv_candle['volume'] += 1
+                    in_progress_ohlcv_candle['volume'] += 1 
                     # logging.debug(f"Updating in-progress candle for {interval_start_time_dt}: C={tick_price}, H={in_progress_ohlcv_candle['high']}, L={in_progress_ohlcv_candle['low']}")
-
+                
                 # For indicators, use historical candles + the current in-progress one
                 temp_ohlcv_list = list(market_data['ohlcv_candles'])
                 if in_progress_ohlcv_candle:
                     temp_ohlcv_list.append(in_progress_ohlcv_candle) # Add current forming candle
                 indicator_input_data_for_calc = temp_ohlcv_list
-
+            
             else: # current_chart_type == 'tick'
                 # Use recent tick prices for indicators
                 indicator_input_data_for_calc = market_data['prices'][-max_tick_points:] # Use the capped tick prices
@@ -572,19 +572,19 @@ def on_message_for_deriv(ws, message):
             else:
                 updated_data = calculate_indicators(indicator_input_data_for_calc)
                 for key, value in updated_data.items():
-                    if key in market_data:
-                        if isinstance(value, list): market_data[key] = value
+                    if key in market_data: 
+                        if isinstance(value, list): market_data[key] = value 
                         elif isinstance(value, str): market_data[key] = value
 
     elif msg_type == 'candles':
         raw_candles_list = data.get('candles', [])
         request_info = None
         request_type_str = 'unknown_candles'
-
+        
         if req_id_of_message is not None:
             with shared_data_lock:
                 # .pop() here as candle data is processed immediately into market_data, not via event for Flask
-                request_info = pending_api_requests.pop(req_id_of_message, None)
+                request_info = pending_api_requests.pop(req_id_of_message, None) 
             if request_info:
                 request_type_str = request_info.get('type', 'unknown_candles_type_in_details')
         
@@ -615,7 +615,7 @@ def on_message_for_deriv(ws, message):
                     # prices_for_recalc = [c['close'] for c in parsed_ohlcv_candles] # Old way
                     if parsed_ohlcv_candles: # parsed_ohlcv_candles is the list of dicts
                         updated_data_from_ohlcv = calculate_indicators(parsed_ohlcv_candles)
-                        with market_data_lock:
+                        with market_data_lock: 
                             for key, value in updated_data_from_ohlcv.items():
                                 if key in market_data: # Ensure key exists in DEFAULT_MARKET_DATA
                                     if isinstance(value, list): market_data[key] = value
@@ -648,14 +648,14 @@ def on_message_for_deriv(ws, message):
         with shared_data_lock: # Remove after processing
             if req_id_of_message in pending_api_requests:
                  pending_api_requests.pop(req_id_of_message)
-
+    
     # Fallback for unhandled messages with req_id but no event (should be rare now)
     elif req_id_of_message and request_details:
         logging.warning(f"Message with req_id {req_id_of_message} (type: {request_details.get('type')}) was not handled by specific logic and had no event. Msg Type: {msg_type}. Data: {str(data)[:200]}")
         with shared_data_lock: # Remove to prevent buildup
             if req_id_of_message in pending_api_requests:
                  pending_api_requests.pop(req_id_of_message)
-
+    
     # Fallback for messages without req_id and not handled by msg_type
     elif not req_id_of_message and msg_type not in ['tick', 'subscribe', 'authorize', 'forget', 'candles']:
          logging.warning(f"Unhandled message type '{msg_type}' without req_id: {str(data)[:200]}")
@@ -714,13 +714,13 @@ def get_market_data_endpoint():
     with market_data_lock: 
         # Create a deepcopy to avoid issues if market_data is modified while this runs
         data_to_send = copy.deepcopy(market_data)
-
+        
         # If OHLCV chart is active and there's an in-progress candle, add it to the list for the frontend
         if current_chart_type == 'ohlcv' and in_progress_ohlcv_candle:
             # Ensure ohlcv_candles is a list before trying to append
             if not isinstance(data_to_send.get('ohlcv_candles'), list):
                 data_to_send['ohlcv_candles'] = [] # Initialize if not already a list
-
+            
             # Append a copy of the in-progress candle so modifications don't affect this snapshot
             data_to_send['ohlcv_candles'].append(copy.deepcopy(in_progress_ohlcv_candle))
             # Optional: Re-sort if appending could mess order, though it should be the latest
@@ -751,7 +751,7 @@ def set_chart_settings_endpoint():
 
     new_chart_type = data.get('chart_type', current_chart_type)
     new_timeframe_str = data.get('timeframe_str', None)
-
+    
     chart_type_changed = False
     granularity_changed = False
 
@@ -782,12 +782,12 @@ def set_chart_settings_endpoint():
 
     if chart_type_changed or granularity_changed:
         logging.info(f"Chart settings updated. ChartType: {current_chart_type}, Granularity: {current_granularity_seconds}s.")
-
+        
         # Clear relevant historical data and request fresh historical data if needed
         with market_data_lock:
             market_data['ohlcv_candles'].clear() # Clear old candles on any significant change
             if current_chart_type == 'tick': # For tick chart, also clear price/timestamp arrays
-                 market_data['prices'].clear()
+                 market_data['prices'].clear() 
                  market_data['timestamps'].clear()
             # Reset all indicator arrays as they depend on the price data type and granularity
             for key in DEFAULT_MARKET_DATA.keys():
@@ -873,7 +873,7 @@ def home():
 def check_deriv_token(token):
     global next_req_id, pending_api_requests, shared_data_lock
     logging.info(f"[Token Check] Starting token validation for token: {'********' if token else 'No token'}")
-
+    
     # Use a temporary WebSocket connection for this check
     temp_ws = websocket.create_connection(DERIV_WS_URL, timeout=10)
     if not temp_ws or not temp_ws.connected:
@@ -881,19 +881,19 @@ def check_deriv_token(token):
         return {'success': False, 'error': "Failed to connect to Deriv WebSocket."}
 
     validation_result = {'success': False, 'error': None}
-
+    
     try:
         # Deriv API requires a unique req_id for each request for proper tracking,
         # even for a simple authorize check on a temporary connection.
         with shared_data_lock: # Protect next_req_id
-            check_req_id = next_req_id
+            check_req_id = next_req_id 
             next_req_id += 1
             # No event needed here as we are doing a blocking recv
-
+        
         authorize_payload = {"authorize": token, "req_id": check_req_id}
         logging.debug(f"[Token Check] Sending authorize request: {json.dumps(authorize_payload)}")
         temp_ws.send(json.dumps(authorize_payload))
-
+        
         # Wait for the response
         response_str = temp_ws.recv() # Blocking receive
         if not response_str:
@@ -950,13 +950,13 @@ def send_ws_request_and_wait(payload_type: str, payload: dict, timeout_seconds=1
 
     response_event = threading.Event()
     request_entry = {'type': payload_type, 'event': response_event, 'data': None, 'error': None}
-
+    
     with shared_data_lock:
         current_req_id = next_req_id
         next_req_id += 1
         payload['req_id'] = current_req_id
         pending_api_requests[current_req_id] = request_entry
-
+    
     logging.info(f"Sending {payload_type} request (req_id: {current_req_id}): {json.dumps(payload)}")
     ws_app.send(json.dumps(payload))
 
@@ -965,7 +965,7 @@ def send_ws_request_and_wait(payload_type: str, payload: dict, timeout_seconds=1
         with shared_data_lock: # Ensure atomicity of accessing and clearing the entry
             # The entry might have been removed by on_message if error occurred there
             # or if it was processed there. This re-check is to ensure we get the data if available.
-            final_request_details = pending_api_requests.pop(current_req_id, request_entry)
+            final_request_details = pending_api_requests.pop(current_req_id, request_entry) 
 
         if final_request_details.get('error'):
             logging.error(f"{payload_type} request (req_id: {current_req_id}) failed: {final_request_details['error']}")
@@ -988,9 +988,9 @@ def send_ws_request_and_wait(payload_type: str, payload: dict, timeout_seconds=1
 def get_account_balance():
     if not API_TOKEN:
         return jsonify({'status': 'error', 'message': 'API token not configured or user not connected.'}), 401
-
+    
     balance_payload = {"balance": 1} # "subscribe": 1 can be added if continuous updates are needed
-
+    
     data, error = send_ws_request_and_wait('account_balance', balance_payload)
 
     if error:
@@ -1032,7 +1032,7 @@ def execute_trade():
 
     if not all([symbol, trade_type, amount]):
         return jsonify({'status': 'error', 'message': 'Missing parameters: symbol, trade_type, or amount.'}), 400
-
+    
     try:
         amount = float(amount) # Or int depending on Deriv requirements for stake
     except ValueError:
@@ -1057,21 +1057,21 @@ def execute_trade():
         "duration_unit": "s",
         "barrier": "+0" # Example for simple rise, adjust if needed
     }
-
+    
     logging.info(f"Requesting trade proposal for {symbol}, Amount: {amount}, Type: CALL")
     proposal_data, proposal_error = send_ws_request_and_wait('trade_proposal', proposal_payload, timeout_seconds=10)
 
     if proposal_error:
         logging.error(f"Trade proposal failed: {proposal_error}")
         return jsonify({'status': 'error', 'message': f"Trade proposal failed: {proposal_error}"}), 500
-
+    
     if not proposal_data or 'proposal' not in proposal_data or 'id' not in proposal_data['proposal']:
         logging.error(f"Invalid proposal data received: {proposal_data}")
         return jsonify({'status': 'error', 'message': 'Invalid proposal data received from Deriv API.'}), 500
 
     proposal_id = proposal_data['proposal']['id']
     proposed_price = proposal_data['proposal'].get('ask_price') # Or spot, depending on contract
-
+    
     logging.info(f"Proposal successful. ID: {proposal_id}, Price: {proposed_price}. Proceeding to buy.")
 
     # 2. Execute Buy
@@ -1079,7 +1079,7 @@ def execute_trade():
         "buy": proposal_id,
         "price": proposed_price # Or a sufficiently high price for market orders, Deriv usually uses the price from proposal
     }
-
+    
     buy_data, buy_error = send_ws_request_and_wait('trade_buy', buy_payload, timeout_seconds=15)
 
     if buy_error:
@@ -1114,7 +1114,7 @@ def create_strategy():
         return jsonify({"error": "Invalid strategy payload. 'strategy_name' and 'conditions_group' are required."}), 400
 
     strategy_id = strategy_data.get('strategy_id', uuid.uuid4().hex)
-
+    
     with strategies_lock:
         if strategy_id in custom_strategies:
              # If user provides an ID that already exists, it's a conflict, unless we decide PUT-like behavior for POST
@@ -1126,7 +1126,7 @@ def create_strategy():
              else: # ID was generated
                  while strategy_id in custom_strategies: # Ensure generated ID is unique (highly unlikely for UUID, but good practice)
                      strategy_id = uuid.uuid4().hex
-
+        
         new_strategy = {
             "strategy_id": strategy_id,
             "strategy_name": strategy_data.get("strategy_name"),
@@ -1137,7 +1137,7 @@ def create_strategy():
             "updated_at": datetime.now(timezone.utc).isoformat()
         }
         custom_strategies[strategy_id] = new_strategy
-
+    
     save_strategies_to_file()
     logging.info(f"Created strategy with ID: {strategy_id}, Name: {new_strategy['strategy_name']}")
     return jsonify(new_strategy), 201
@@ -1172,16 +1172,16 @@ def update_strategy(strategy_id):
             return jsonify({"error": "Strategy not found"}), 404
 
         existing_strategy = custom_strategies[strategy_id]
-
+        
         # Update fields if present in the payload
         existing_strategy["strategy_name"] = strategy_updates.get("strategy_name", existing_strategy["strategy_name"])
         existing_strategy["description"] = strategy_updates.get("description", existing_strategy["description"])
         existing_strategy["conditions_group"] = strategy_updates.get("conditions_group", existing_strategy["conditions_group"])
         existing_strategy["actions"] = strategy_updates.get("actions", existing_strategy["actions"])
         existing_strategy["updated_at"] = datetime.now(timezone.utc).isoformat()
-
+        
         custom_strategies[strategy_id] = existing_strategy
-
+    
     save_strategies_to_file()
     logging.info(f"Updated strategy with ID: {strategy_id}")
     return jsonify(existing_strategy)
@@ -1193,10 +1193,10 @@ def delete_strategy(strategy_id):
         if strategy_id not in custom_strategies:
             logging.warning(f"Strategy with ID {strategy_id} not found (DELETE).")
             return jsonify({"error": "Strategy not found"}), 404
-
+        
         deleted_strategy_name = custom_strategies[strategy_id].get("strategy_name", "N/A")
         del custom_strategies[strategy_id]
-
+    
     save_strategies_to_file()
     logging.info(f"Deleted strategy with ID: {strategy_id}, Name: {deleted_strategy_name}")
     return jsonify({"message": "Strategy deleted successfully"}), 200
