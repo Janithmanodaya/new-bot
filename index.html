@@ -455,6 +455,29 @@
                 grid-template-columns: 1fr;
             }
         }
+        /* Added styles for strategy view */
+        .btn-sm {
+            padding: 5px 10px;
+            font-size: 0.875em; /* Example size */
+        }
+        .strategy-item:hover {
+           transform: translateY(-3px);
+           box-shadow: 0 6px 12px rgba(0, 0, 0, 0.2);
+        }
+        /* Ensure icons in buttons are aligned */
+        .btn i {
+           margin-right: 5px;
+        }
+        /* Styles for Strategy Builder View */
+        #strategyBuilderView label {
+            color: var(--light); /* Ensure labels are visible */
+        }
+        #strategyBuilderView fieldset {
+            border-color: var(--border); /* Ensure consistent border color */
+        }
+        #strategyBuilderView legend {
+            color: var(--gray); /* Ensure legend text is styled */
+        }
     </style>
 </head>
 <body>
@@ -644,17 +667,91 @@
             </div>
         </div>
 
-        <div id="strategiesView" style="display:none; padding: 20px; background: var(--card-bg); border-radius: 12px; border: 1px solid var(--border); margin-bottom: 20px;">
-            <h2 style="margin-bottom: 20px; font-size: 22px; font-weight: 600; color: var(--light);">My Custom Strategies</h2>
-            <button id="createNewStrategyBtn" class="btn" style="background-color: var(--success); margin-bottom: 20px;">
-                <i class="fas fa-plus-circle"></i> Create New Strategy
-            </button>
-            <div id="strategiesListContainer" style="border: 1px solid var(--border); border-radius: 8px; padding: 15px; min-height: 200px; background-color: var(--secondary);">
-                <!-- Strategies will be listed here by JavaScript -->
-                <p style="color: var(--gray);">No strategies loaded yet. Click "My Strategies" or use the navigation to load them.</p>
+        <!-- Strategies View (Initially Hidden) -->
+        <div id="strategiesView" style="display:none; padding-top: 20px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding: 0 10px;">
+                <h2 style="font-size: 24px; font-weight: 600; color: var(--light);">My Custom Strategies</h2>
+                <button class="btn" id="createNewStrategyBtn" style="display: flex; align-items: center; gap: 8px;">
+                    <i class="fas fa-plus"></i> Create New Strategy
+                </button>
+            </div>
+            <div id="strategiesListContainer" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(350px, 1fr)); gap: 20px; padding: 0 10px;">
+                <!-- Strategies will be loaded here by JavaScript -->
             </div>
         </div>
-        
+
+        <!-- Strategy Builder View (Initially Hidden) -->
+        <div id="strategyBuilderView" style="display:none; padding-top: 20px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding: 0 10px;">
+                <h2 id="strategyBuilderTitle" style="font-size: 24px; font-weight: 600; color: var(--light);">Create New Strategy</h2>
+                <div>
+                    <button class="btn btn-outline" id="cancelStrategyBtn" style="margin-right: 10px;"><i class="fas fa-times"></i> Cancel</button>
+                    <button class="btn" id="saveStrategyBtn"><i class="fas fa-save"></i> Save Strategy</button>
+                </div>
+            </div>
+
+            <div class="form-container" style="background: var(--card-bg); border-radius: 12px; border: 1px solid var(--border); padding: 25px;">
+                <input type="hidden" id="strategyIdInput" value=""> <!-- For storing ID when editing -->
+
+                <div class="form-group" style="margin-bottom: 20px;">
+                    <label for="strategyNameInput" style="display: block; margin-bottom: 8px; font-weight: 500;">Strategy Name</label>
+                    <input type="text" id="strategyNameInput" placeholder="e.g., 'RSI Buy Signal'" style="width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--dark); color: var(--light);">
+                </div>
+
+                <div class="form-group" style="margin-bottom: 20px;">
+                    <label for="strategyDescriptionInput" style="display: block; margin-bottom: 8px; font-weight: 500;">Description</label>
+                    <textarea id="strategyDescriptionInput" placeholder="Describe the strategy's logic and purpose" style="width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--dark); color: var(--light); min-height: 80px;"></textarea>
+                </div>
+
+                <fieldset style="border: 1px solid var(--border); border-radius: 8px; padding: 15px; margin-bottom: 20px;">
+                    <legend style="padding: 0 10px; font-weight: 500; color: var(--gray);">Conditions</legend>
+                    <div id="conditionsContainer">
+                        <!-- Conditions will be added here dynamically -->
+                        <div class="condition-item" style="display: flex; gap: 10px; align-items: center; margin-bottom: 10px;">
+                            <select class="condition-indicator" style="padding: 8px; border-radius: 6px; background: var(--dark); color: var(--light); border: 1px solid var(--border);">
+                                <option value="RSI">RSI</option>
+                                <option value="MACD">MACD</option>
+                                <option value="STOCH">Stochastic</option>
+                                <option value="PRICE">Price</option>
+                            </select>
+                            <select class="condition-operator" style="padding: 8px; border-radius: 6px; background: var(--dark); color: var(--light); border: 1px solid var(--border);">
+                                <option value="<">&lt;</option>
+                                <option value="<=">&lt;=</option>
+                                <option value="==">==</option>
+                                <option value=">=">&gt;=</option>
+                                <option value=">">&gt;</option>
+                                <option value="CROSS_ABOVE">Crosses Above</option>
+                                <option value="CROSS_BELOW">Crosses Below</option>
+                            </select>
+                            <input type="text" class="condition-value" placeholder="Value (e.g., 30)" style="padding: 8px; border-radius: 6px; background: var(--dark); color: var(--light); border: 1px solid var(--border); flex-grow: 1;">
+                            <!-- <button class="btn btn-outline btn-sm remove-condition-btn" style="border-color: var(--danger); color: var(--danger);">-</button> -->
+                        </div>
+                    </div>
+                    <!-- <button class="btn btn-outline btn-sm" id="addConditionBtn" style="margin-top:10px;"><i class="fas fa-plus"></i> Add Condition</button> -->
+                    <p style="font-size:0.8em; color:var(--gray); margin-top:5px;">Note: For simplicity, currently supports one condition. Grouped and multiple conditions will be a future enhancement.</p>
+                </fieldset>
+
+                <fieldset style="border: 1px solid var(--border); border-radius: 8px; padding: 15px; margin-bottom: 20px;">
+                    <legend style="padding: 0 10px; font-weight: 500; color: var(--gray);">Actions</legend>
+                    <div id="actionsContainer">
+                        <!-- Actions will be added here dynamically -->
+                        <div class="action-item" style="display: flex; gap: 10px; align-items: center; margin-bottom: 10px;">
+                            <select class="action-type" style="padding: 8px; border-radius: 6px; background: var(--dark); color: var(--light); border: 1px solid var(--border);">
+                                <option value="BUY">BUY</option>
+                                <option value="SELL">SELL</option>
+                                <option value="NOTIFY_EMAIL">Notify (Email)</option>
+                                <option value="NOTIFY_ALERT">Notify (Alert)</option>
+                            </select>
+                            <input type="text" class="action-details" placeholder="Action details (e.g., stake amount, email address)" style="padding: 8px; border-radius: 6px; background: var(--dark); color: var(--light); border: 1px solid var(--border); flex-grow: 1;">
+                            <!-- <button class="btn btn-outline btn-sm remove-action-btn" style="border-color: var(--danger); color: var(--danger);">-</button> -->
+                        </div>
+                    </div>
+                    <!-- <button class="btn btn-outline btn-sm" id="addActionBtn" style="margin-top:10px;"><i class="fas fa-plus"></i> Add Action</button> -->
+                    <p style="font-size:0.8em; color:var(--gray); margin-top:5px;">Note: For simplicity, currently supports one action. Multiple actions will be a future enhancement.</p>
+                </fieldset>
+            </div>
+        </div>
+
         <footer>
             <p>Deriv Market Analytics Dashboard • Data provided by Deriv API • Real-time market analysis</p>
             <p>This is a demo interface. Connect to Deriv API for live data.</p>
@@ -1379,8 +1476,7 @@
             const strategyBuilderView = document.getElementById('strategyBuilderView'); // Added
             const navStrategiesBtn = document.getElementById('navStrategiesBtn');
             const homeNavLogo = document.getElementById('homeNavLogo');
-            const createNewStrategyBtn = document.getElementById('createNewStrategyBtn');
-            // const createNewStrategyBtn = document.getElementById('createNewStrategyBtn'); // Added // This was a duplicate comment from a previous step
+            const createNewStrategyBtn = document.getElementById('createNewStrategyBtn'); // Added
 
             const mainViews = ['dashboardView', 'strategiesView', 'strategyBuilderView'];
 
@@ -1493,263 +1589,374 @@
             // View Switching Logic
             if (navStrategiesBtn) {
                 navStrategiesBtn.addEventListener('click', function() {
-                    // The showView function already checks for element existence and calls loadAndDisplayCustomStrategies
-                    showView('strategiesView');
-                    console.log("Switched to Strategies View via navStrategiesBtn");
+                    if (dashboardView) dashboardView.style.display = 'none';
+                    if (strategiesView) strategiesView.style.display = 'block';
+                    else console.warn("strategiesView element not found for display.");
+                    // Optional: Add active class styling to navStrategiesBtn and remove from other main nav buttons
+                    console.log("Switched to Strategies View");
+                    // You might want to load strategies here if not loaded automatically
+                    // fetchAndDisplayStrategies();
                 });
             }
 
             if (homeNavLogo) {
                 homeNavLogo.addEventListener('click', function() {
-                    // The showView function already checks for element existence
-                    showView('dashboardView');
-                    console.log("Switched to Dashboard View via homeNavLogo");
+                    if (strategiesView) strategiesView.style.display = 'none';
+                    if (dashboardView) dashboardView.style.display = 'block'; // Assuming 'block' is the correct display style for dashboardView
+                    // Optional: Update active button styling
+                    console.log("Switched to Dashboard View");
                 });
             }
 
-            // Initial view state on page load
-            showView('dashboardView'); // This will show dashboardView and hide others, including strategiesView
-
-            // Event Listener for "Create New Strategy" button
-            if (createNewStrategyBtn) {
-                createNewStrategyBtn.addEventListener('click', async function() {
-                    const strategyName = prompt("Enter a name for your new strategy:");
-
-                    if (!strategyName || strategyName.trim() === "") {
-                        alert("Strategy name cannot be empty. Creation cancelled.");
-                        return;
-                    }
-
-                    const strategySymbol = currentSelectedSymbol || 'USD/JPY'; // Use global or default
-
-                    const newStrategyData = {
-                        strategy_name: strategyName.trim(),
-                        description: `Basic strategy for ${strategySymbol} created from UI.`,
-                        conditions_group: {
-                            logic: "AND",
-                            conditions: [
-                                {
-                                    indicator: "RSI",
-                                    period: 14,
-                                    operator: "<",
-                                    value: 30,
-                                    symbol: strategySymbol
-                                }
-                            ]
-                        },
-                        actions: [
-                            {
-                                type: "BUY", // Or "RISE" if using Deriv contract types directly
-                                amount: 10, // Example amount
-                                currency: "USD" // Example currency
-                            }
-                        ]
-                    };
-
-                    try {
-                        const response = await fetch('/api/strategies', {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json',
-                            },
-                            body: JSON.stringify(newStrategyData),
-                        });
-
-                        if (response.ok && response.status === 201) {
-                            alert('Strategy "' + strategyName + '" created successfully!');
-                            if (typeof loadAndDisplayCustomStrategies === 'function') {
-                                loadAndDisplayCustomStrategies(); // Refresh the list
-                            }
-                        } else {
-                            const errorData = await response.json().catch(() => null); // Try to parse error, but don't fail if no body
-                            const errorMessage = errorData ? errorData.message || JSON.stringify(errorData) : `HTTP error ${response.status}`;
-                            alert(`Failed to create strategy: ${errorMessage}`);
-                        }
-                    } catch (error) {
-                        console.error('Error creating new strategy:', error);
-                        alert('Failed to create strategy due to a network or script error: ' + error.message);
-                    }
-                });
-            } else {
-                console.warn("createNewStrategyBtn not found during DOMContentLoaded. Cannot attach listener.");
-            }
-
-            async function handleDeleteStrategy(strategyId) {
-                if (!strategyId) {
-                    alert("Strategy ID is missing. Cannot delete.");
-                    return;
-                }
-
-                const userConfirmed = confirm(`Are you sure you want to delete strategy ID: ${strategyId}?`);
-                if (!userConfirmed) {
-                    console.log("User cancelled strategy deletion.");
-                    return;
-                }
-
-                console.log(`Proceeding with deletion for strategy ID: ${strategyId}`);
-
-                try {
-                    const response = await fetch(`/api/strategies/${strategyId}`, {
-                        method: 'DELETE',
-                    });
-
-                    if (response.ok) { // Handles 200 OK or 204 No Content
-                        alert('Strategy deleted successfully!');
-                        if (typeof loadAndDisplayCustomStrategies === 'function') {
-                            loadAndDisplayCustomStrategies(); // Refresh the list
-                        }
-                    } else {
-                        // Try to parse error message from backend if available
-                        const errorData = await response.json().catch(() => null); // Avoids error if response is not JSON
-                        const errorMessage = errorData ? (errorData.message || JSON.stringify(errorData)) : `HTTP error ${response.status}`;
-                        console.error(`Failed to delete strategy ${strategyId}. Status: ${response.status}, Message: ${errorMessage}`);
-                        alert(`Failed to delete strategy: ${errorMessage}`);
-                    }
-                } catch (error) {
-                    console.error('Error during strategy deletion fetch:', error);
-                    alert('Failed to delete strategy due to a network or script error: ' + error.message);
-                }
-            }
+            // Ensure default view state on load (dashboard visible, strategies hidden)
+            if (dashboardView) dashboardView.style.display = 'block';
+            if (strategiesView) strategiesView.style.display = 'none';
+            // else if(navStrategiesBtn) console.warn("strategiesView element not found for initial hide during page load."); // This warning can be removed if strategiesView is dynamically created by loadAndDisplayCustomStrategies or always present.
 
             async function loadAndDisplayCustomStrategies() {
-                const container = document.getElementById('strategiesListContainer');
+                let container = document.getElementById('strategiesListContainer');
                 if (!container) {
-                    console.error('strategiesListContainer element not found. Cannot display strategies.');
-                    return;
+                    console.error('strategiesListContainer element not found initially. Attempting to find/create strategiesView and container.');
+                    const mainContainer = document.querySelector('.container'); // Or wherever views are placed
+                    let strategiesViewDiv = document.getElementById('strategiesView');
+
+                    if (mainContainer && !strategiesViewDiv) {
+                        console.log("strategiesView is missing, creating it dynamically as fallback.");
+                        strategiesViewDiv = document.createElement('div');
+                        strategiesViewDiv.id = 'strategiesView';
+                        strategiesViewDiv.style.display = 'none'; // Keep it hidden initially, showView will manage
+                        strategiesViewDiv.innerHTML = `
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding: 0 10px;">
+                                <h2 style="font-size: 24px; font-weight: 600; color: var(--light);">My Custom Strategies</h2>
+                                <button class="btn" id="createNewStrategyBtn" style="display: flex; align-items: center; gap: 8px;">
+                                    <i class="fas fa-plus"></i> Create New Strategy
+                                </button>
+                            </div>
+                            <div id="strategiesListContainer" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(350px, 1fr)); gap: 20px; padding: 0 10px;"></div>
+                        `;
+                        const footer = document.querySelector('footer');
+                        if (footer) {
+                           mainContainer.insertBefore(strategiesViewDiv, footer);
+                        } else {
+                           mainContainer.appendChild(strategiesViewDiv);
+                        }
+                        console.log("Dynamically created #strategiesView and #strategiesListContainer.");
+                        container = document.getElementById('strategiesListContainer'); // Re-assign container
+                    } else if (strategiesViewDiv && !container) { // strategiesView exists, but container inside it is missing
+                        console.error('strategiesView exists, but strategiesListContainer is missing. HTML structure might be incorrect. Trying to create container inside strategiesView.');
+                        const newContainerDiv = document.createElement('div');
+                        newContainerDiv.id = 'strategiesListContainer';
+                        newContainerDiv.style.display = 'grid';
+                        newContainerDiv.style.gridTemplateColumns = 'repeat(auto-fill, minmax(350px, 1fr))';
+                        newContainerDiv.style.gap = '20px';
+                        newContainerDiv.style.padding = '0 10px';
+                        // Append to strategiesView, assuming strategiesView's innerHTML was cleared or is minimal
+                        strategiesViewDiv.appendChild(newContainerDiv);
+                        container = newContainerDiv; // Re-assign
+                        if (container) console.log("Dynamically created #strategiesListContainer inside existing #strategiesView.");
+                    }
+
+                    if (!container) { // If still not found after dynamic creation attempt
+                       console.error("Failed to create or find strategiesListContainer even after dynamic attempt. Cannot display strategies.");
+                       const strategiesViewFallback = document.getElementById('strategiesView');
+                       if(strategiesViewFallback) {
+                           // Avoid overwriting entire strategiesView if it was correctly added in HTML but container is the issue.
+                           // Instead, show error within the container or a specific error message area.
+                           const errorMsgElement = document.createElement('p');
+                           errorMsgElement.style.color = 'var(--danger)';
+                           errorMsgElement.style.textAlign = 'center';
+                           errorMsgElement.textContent = 'Error: UI components for strategies are missing or failed to load. Please check HTML structure.';
+                           // Clear previous content of strategiesViewFallback and append error or append to a designated error spot
+                           strategiesViewFallback.innerHTML = ''; // Clear previous content like headers if they are part of this fallback
+                           strategiesViewFallback.appendChild(errorMsgElement);
+                       }
+                       return;
+                    }
                 }
                 container.innerHTML = '<p style="color: var(--gray);">Loading strategies...</p>';
 
                 try {
                     const response = await fetch('/api/strategies');
                     if (!response.ok) {
-                        throw new Error(`HTTP error! status: ${response.status}, message: ${await response.text()}`);
+                        throw new Error(`HTTP error! status: ${response.status}`);
                     }
                     const strategies = await response.json();
                     container.innerHTML = ''; // Clear loading message
 
                     if (strategies.length === 0) {
-                        container.innerHTML = '<p style="color: var(--gray);">No strategies found. Click the "Create New Strategy" button to start.</p>';
+                        container.innerHTML = '<p style="color: var(--gray); text-align: center; grid-column: 1 / -1;">No strategies found. Click the "Create New Strategy" button to start.</p>';
                     } else {
                         strategies.forEach(strategy => {
                             const strategyEl = document.createElement('div');
-                            strategyEl.className = 'strategy-item';
-                            strategyEl.style.border = '1px solid var(--border)';
-                            strategyEl.style.borderRadius = '8px';
-                            strategyEl.style.padding = '15px';
-                            strategyEl.style.marginBottom = '15px';
-                            strategyEl.style.backgroundColor = 'rgba(30, 41, 59, 0.3)'; // Slightly different background for item
+                            strategyEl.className = 'strategy-item indicator-card'; // Reuse indicator-card styling
+                            strategyEl.style.transition = 'transform 0.2s ease, box-shadow 0.2s ease'; // Add hover effects
 
-                            // Strategy Name
-                            const nameEl = document.createElement('h4');
-                            nameEl.style.marginBottom = '5px';
-                            nameEl.style.color = 'var(--light)';
-                            nameEl.textContent = strategy.strategy_name;
-                            strategyEl.appendChild(nameEl);
+                            let content = `<div class="indicator-header">
+                                              <h4 class="indicator-title" style="font-size: 17px;">${strategy.strategy_name || 'Unnamed Strategy'}</h4>
+                                          </div>`;
+                            content += `<p style="font-size: 0.9em; color: var(--gray); margin-bottom: 12px; min-height: 40px;">${strategy.description || 'No description.'}</p>`;
 
-                            // Symbol (if available)
-                            if (strategy.symbol) {
-                                const symbolEl = document.createElement('p');
-                                symbolEl.style.fontSize = '0.9em';
-                                symbolEl.style.color = 'var(--gray)';
-                                symbolEl.textContent = `Symbol: ${strategy.symbol}`;
-                                strategyEl.appendChild(symbolEl);
+                            // Display conditions and actions in a more readable, but still basic, way
+                            if (strategy.conditions_group && strategy.conditions_group.conditions && strategy.conditions_group.conditions.length > 0) {
+                                content += `<strong style="font-size:0.85em; color: var(--light);">Conditions:</strong><ul style="font-size:0.8em; color:var(--gray); margin-left:15px; margin-bottom:8px;">`;
+                                strategy.conditions_group.conditions.forEach(cond => {
+                                   content += `<li>${cond.indicator || cond.type} ${cond.operator} ${cond.value}</li>`;
+                                });
+                                content += `</ul>`;
+                            } else {
+                                content += `<p style="font-size:0.8em; color:var(--gray); margin-bottom:8px;">No conditions defined.</p>`;
                             }
 
-                            // Description
-                            const descriptionEl = document.createElement('p');
-                            descriptionEl.style.fontSize = '0.9em';
-                            descriptionEl.style.marginBottom = '10px';
-                            descriptionEl.style.color = 'var(--light)';
-                            descriptionEl.textContent = strategy.description || 'No description provided.';
-                            strategyEl.appendChild(descriptionEl);
+                            if (strategy.actions && strategy.actions.length > 0) {
+                                content += `<strong style="font-size:0.85em; color: var(--light);">Actions:</strong><ul style="font-size:0.8em; color:var(--gray); margin-left:15px; margin-bottom:15px;">`;
+                                strategy.actions.forEach(act => {
+                                   content += `<li>${act.type} ${act.details || ''}</li>`;
+                                });
+                                content += `</ul>`;
+                            } else {
+                                content += `<p style="font-size:0.8em; color:var(--gray); margin-bottom:15px;">No actions defined.</p>`;
+                            }
                             
-                            // Conditions
-                            const conditionsTitle = document.createElement('p');
-                            conditionsTitle.style.fontSize = '0.85em';
-                            conditionsTitle.style.color = 'var(--gray)';
-                            conditionsTitle.style.marginTop = '10px';
-                            conditionsTitle.style.fontWeight = '600';
-                            conditionsTitle.textContent = 'Conditions:';
-                            strategyEl.appendChild(conditionsTitle);
-
-                            const conditionsPre = document.createElement('pre');
-                            conditionsPre.style.fontSize = '0.75em';
-                            conditionsPre.style.color = 'var(--gray)';
-                            conditionsPre.style.backgroundColor = 'rgba(0,0,0,0.2)';
-                            conditionsPre.style.padding = '5px';
-                            conditionsPre.style.borderRadius = '4px';
-                            conditionsPre.style.whiteSpace = 'pre-wrap'; // Ensure content wraps
-                            conditionsPre.textContent = JSON.stringify(strategy.conditions_group, null, 2);
-                            strategyEl.appendChild(conditionsPre);
-
-                            // Actions
-                            const actionsTitle = document.createElement('p');
-                            actionsTitle.style.fontSize = '0.85em';
-                            actionsTitle.style.color = 'var(--gray)';
-                            actionsTitle.style.marginTop = '5px';
-                            actionsTitle.style.fontWeight = '600';
-                            actionsTitle.textContent = 'Actions:';
-                            strategyEl.appendChild(actionsTitle);
-
-                            const actionsPre = document.createElement('pre');
-                            actionsPre.style.fontSize = '0.75em';
-                            actionsPre.style.color = 'var(--gray)';
-                            actionsPre.style.backgroundColor = 'rgba(0,0,0,0.2)';
-                            actionsPre.style.padding = '5px';
-                            actionsPre.style.borderRadius = '4px';
-                            actionsPre.style.whiteSpace = 'pre-wrap';
-                            actionsPre.textContent = JSON.stringify(strategy.actions, null, 2);
-                            strategyEl.appendChild(actionsPre);
-
-                            // Buttons container
-                            const buttonsDiv = document.createElement('div');
-                            buttonsDiv.style.marginTop = '15px';
-                            buttonsDiv.style.display = 'flex';
-                            buttonsDiv.style.gap = '10px';
-
-                            // Edit Button
-                            const editButton = document.createElement('button');
-                            editButton.className = 'btn btn-sm'; // Using btn-sm for smaller padding
-                            editButton.textContent = 'Edit';
-                            editButton.style.padding = '5px 10px'; // Custom padding for "sm" effect
-                            editButton.style.fontSize = '0.8em';
-                            editButton.style.backgroundColor = 'transparent';
-                            editButton.style.border = '1px solid var(--gray)';
-                            editButton.style.color = 'var(--gray)';
-                            editButton.addEventListener('click', () => {
-                                alert('Edit functionality for strategy ID ' + strategy.strategy_id + ' will be implemented later.');
-                            });
-                            buttonsDiv.appendChild(editButton);
-
-                            // Delete Button
-                            const deleteButton = document.createElement('button');
-                            deleteButton.className = 'btn btn-sm';
-                            deleteButton.textContent = 'Delete';
-                            deleteButton.style.padding = '5px 10px';
-                            deleteButton.style.fontSize = '0.8em';
-                            deleteButton.style.backgroundColor = 'transparent';
-                            deleteButton.style.border = '1px solid var(--danger)';
-                            deleteButton.style.color = 'var(--danger)';
-                            deleteButton.addEventListener('click', () => {
-                                // Pass strategy.strategy_id if available, otherwise a fallback like strategy.strategy_name
-                                handleDeleteStrategy(strategy.strategy_id || strategy.strategy_name);
-                            });
-                            buttonsDiv.appendChild(deleteButton);
-                            
-                            strategyEl.appendChild(buttonsDiv);
+                            content += `<div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: auto; padding-top:10px; border-top: 1px solid var(--border);">
+                                            <button class="btn btn-outline btn-sm edit-strategy-btn" data-id="${strategy.strategy_id}" style="padding: 6px 12px; font-size: 0.85em;"><i class="fas fa-edit"></i> Edit</button>
+                                            <button class="btn btn-outline btn-sm delete-strategy-btn" data-id="${strategy.strategy_id}" style="padding: 6px 12px; font-size: 0.85em; border-color: var(--danger); color: var(--danger);"><i class="fas fa-trash"></i> Delete</button>
+                                        </div>`;
+                            strategyEl.innerHTML = content;
                             container.appendChild(strategyEl);
+
+                            // Add event listeners for new buttons
+                            strategyEl.querySelector('.edit-strategy-btn').addEventListener('click', function() {
+                                window.handleEditStrategy(this.dataset.id);
+                            });
+                            strategyEl.querySelector('.delete-strategy-btn').addEventListener('click', function() {
+                                window.handleDeleteStrategy(this.dataset.id);
+                            });
                         });
                     }
                 } catch (error) {
                     console.error('Failed to load strategies:', error);
-                    container.innerHTML = `<p style="color: var(--danger);">Failed to load strategies. Details: ${error.message}. Please try again later.</p>`;
+                    container.innerHTML = '<p style="color: var(--danger); text-align: center; grid-column: 1 / -1;">Failed to load strategies. Please try again later.</p>';
                 }
             }
 
-            // Modify navStrategiesBtn event listener to call loadAndDisplayCustomStrategies
-            // This is handled by showView('strategiesView') calling loadAndDisplayCustomStrategies
-            // No duplicate listener needed here. The one above that calls showView is sufficient.
+            // Placeholder functions for handleEditStrategy and handleDeleteStrategy
+            // These need to be accessible globally or within the scope where event listeners are added.
+            // Defining them on `window` makes them globally accessible.
+            if (typeof window.handleEditStrategy === 'undefined') {
+                window.handleEditStrategy = function(strategyId) {
+                    console.log("Edit strategy clicked for ID:", strategyId);
+                    // Implementation will be part of Step 3: show strategy builder with this strategy's data.
+                    alert("Edit functionality will be implemented in the next step.");
+                };
+            }
+            if (typeof window.handleDeleteStrategy === 'undefined') {
+                window.handleDeleteStrategy = async function(strategyId) {
+                    console.log("Delete strategy clicked for ID:", strategyId);
+                    // Basic implementation for now, will be refined in Step 3
+                    if (confirm('Are you sure you want to delete this strategy?')) {
+                        // Actual deletion logic will be in Step 3.
+                        alert("Delete functionality (calling backend) will be implemented in Step 3. For now, it will just reload the list.");
+                        // Temporarily, just reload the list to simulate removal if backend was called.
+                        loadAndDisplayCustomStrategies();
+                    }
+                };
+            }
 
+            // The existing `DOMContentLoaded` listener already has a section for `navStrategiesBtn`.
+            // The `showView` function (called by navStrategiesBtn click) handles calling `loadAndDisplayCustomStrategies`.
+            // This is the preferred way. The original direct listener for navStrategiesBtn in the prompt might be simplified
+            // to just call showView('strategiesView').
+            // For now, ensuring showView correctly calls loadAndDisplayCustomStrategies is key, which it does.
+            // The prompt's note on navStrategiesBtn: "This existing listener is fine." (referring to the one in DOMContentLoaded)
+            // The listener in DOMContentLoaded is:
+            // if (navStrategiesBtn) {
+            //     navStrategiesBtn.addEventListener('click', function() {
+            //         if (dashboardView) dashboardView.style.display = 'none';
+            //         if (strategiesView) {
+            //             strategiesView.style.display = 'block';
+            //             loadAndDisplayCustomStrategies(); // This is correctly called here
+            //         } else {
+            //             console.warn("strategiesView element not found for display. Cannot load strategies.");
+            //         }
+            //         console.log("Switched to Strategies View");
+            //     });
+            // }
+            // This is fine as per the prompt.
+
+            // --- Strategy CRUD and Navigation Logic START ---
+
+            // Wire up "Create New Strategy" button
+            const createNewStrategyBtn = document.getElementById('createNewStrategyBtn');
+            if (createNewStrategyBtn) {
+                createNewStrategyBtn.addEventListener('click', function() {
+                    document.getElementById('strategyBuilderTitle').textContent = 'Create New Strategy';
+                    document.getElementById('strategyIdInput').value = ''; // Clear ID for new strategy
+                    document.getElementById('strategyNameInput').value = '';
+                    document.getElementById('strategyDescriptionInput').value = '';
+                    // Reset condition and action fields to default
+                    document.querySelector('#conditionsContainer .condition-indicator').selectedIndex = 0;
+                    document.querySelector('#conditionsContainer .condition-operator').selectedIndex = 0;
+                    document.querySelector('#conditionsContainer .condition-value').value = '';
+                    document.querySelector('#actionsContainer .action-type').selectedIndex = 0;
+                    document.querySelector('#actionsContainer .action-details').value = '';
+                    showView('strategyBuilderView');
+                });
+            }
+
+            // Wire up "Cancel Strategy" button
+            const cancelStrategyBtn = document.getElementById('cancelStrategyBtn');
+            if (cancelStrategyBtn) {
+                cancelStrategyBtn.addEventListener('click', function() {
+                    showView('strategiesView'); // Go back to the list
+                });
+            }
+
+            // Implement handleEditStrategy
+            window.handleEditStrategy = async function(strategyId) {
+                console.log("Attempting to edit strategy ID:", strategyId);
+                try {
+                    const response = await fetch(`/api/strategies/${strategyId}`);
+                    if (!response.ok) {
+                        throw new Error(`Failed to fetch strategy: ${response.status}`);
+                    }
+                    const strategy = await response.json();
+
+                    document.getElementById('strategyBuilderTitle').textContent = 'Edit Strategy';
+                    document.getElementById('strategyIdInput').value = strategy.strategy_id;
+                    document.getElementById('strategyNameInput').value = strategy.strategy_name || '';
+                    document.getElementById('strategyDescriptionInput').value = strategy.description || '';
+
+                    const conditionsGroup = strategy.conditions_group;
+                    if (conditionsGroup && conditionsGroup.conditions && conditionsGroup.conditions.length > 0) {
+                        const firstCondition = conditionsGroup.conditions[0];
+                        document.querySelector('#conditionsContainer .condition-indicator').value = firstCondition.indicator || 'RSI';
+                        document.querySelector('#conditionsContainer .condition-operator').value = firstCondition.operator || '<';
+                        document.querySelector('#conditionsContainer .condition-value').value = firstCondition.value || '';
+                    } else {
+                        document.querySelector('#conditionsContainer .condition-indicator').selectedIndex = 0;
+                        document.querySelector('#conditionsContainer .condition-operator').selectedIndex = 0;
+                        document.querySelector('#conditionsContainer .condition-value').value = '';
+                    }
+
+                    if (strategy.actions && strategy.actions.length > 0) {
+                        const firstAction = strategy.actions[0];
+                        document.querySelector('#actionsContainer .action-type').value = firstAction.type || 'BUY';
+                        document.querySelector('#actionsContainer .action-details').value = firstAction.details || '';
+                    } else {
+                        document.querySelector('#actionsContainer .action-type').selectedIndex = 0;
+                        document.querySelector('#actionsContainer .action-details').value = '';
+                    }
+                    showView('strategyBuilderView');
+                } catch (error) {
+                    console.error('Error fetching strategy for editing:', error);
+                    alert('Could not load strategy data for editing. Please try again.');
+                }
+            };
+
+            // Implement handleDeleteStrategy
+            window.handleDeleteStrategy = async function(strategyId) {
+                console.log("Attempting to delete strategy ID:", strategyId);
+                if (confirm('Are you sure you want to delete this strategy? This action cannot be undone.')) {
+                    try {
+                        const response = await fetch(`/api/strategies/${strategyId}`, {
+                            method: 'DELETE',
+                        });
+                        if (!response.ok) {
+                            const errorData = await response.json().catch(() => ({ detail: 'Unknown error during deletion.' }));
+                            throw new Error(`Failed to delete strategy: ${response.status} - ${errorData.detail || errorData.error || 'Server error'}`);
+                        }
+                        console.log('Strategy deleted successfully');
+                        alert('Strategy deleted successfully.');
+                        loadAndDisplayCustomStrategies();
+                    } catch (error) {
+                        console.error('Error deleting strategy:', error);
+                        alert(`Could not delete strategy: ${error.message}`);
+                    }
+                }
+            };
+
+            // Implement "Save Strategy" logic
+            const saveStrategyBtn = document.getElementById('saveStrategyBtn');
+            if (saveStrategyBtn) {
+                saveStrategyBtn.addEventListener('click', async function() {
+                    const strategyId = document.getElementById('strategyIdInput').value;
+                    const strategyName = document.getElementById('strategyNameInput').value.trim();
+                    const strategyDescription = document.getElementById('strategyDescriptionInput').value.trim();
+
+                    if (!strategyName) {
+                        alert('Strategy Name is required.');
+                        return;
+                    }
+
+                    const conditionIndicator = document.querySelector('#conditionsContainer .condition-indicator').value;
+                    const conditionOperator = document.querySelector('#conditionsContainer .condition-operator').value;
+                    const conditionValue = document.querySelector('#conditionsContainer .condition-value').value.trim();
+
+                    let conditionsGroup = {
+                        logical_operator: 'AND',
+                        conditions: []
+                    };
+                    if (conditionIndicator && conditionOperator && conditionValue) {
+                         conditionsGroup.conditions.push({
+                             indicator: conditionIndicator,
+                             operator: conditionOperator,
+                             value: conditionValue
+                         });
+                    }
+
+                    const actionType = document.querySelector('#actionsContainer .action-type').value;
+                    const actionDetails = document.querySelector('#actionsContainer .action-details').value.trim();
+
+                    let actions = [];
+                    if (actionType) {
+                         actions.push({
+                             type: actionType,
+                             details: actionDetails
+                         });
+                    }
+
+                    const strategyPayload = {
+                        strategy_name: strategyName,
+                        description: strategyDescription,
+                        conditions_group: conditionsGroup,
+                        actions: actions
+                    };
+
+                    let url = '/api/strategies';
+                    let method = 'POST';
+
+                    if (strategyId) {
+                        url = `/api/strategies/${strategyId}`;
+                        method = 'PUT';
+                        strategyPayload.strategy_id = strategyId;
+                    }
+
+                    console.log(`Saving strategy (${method}). URL: ${url}, Payload:`, JSON.stringify(strategyPayload));
+
+                    try {
+                        const response = await fetch(url, {
+                            method: method,
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(strategyPayload)
+                        });
+
+                        if (!response.ok) {
+                            const errorData = await response.json().catch(() => ({ detail: 'Unknown error during save.' }));
+                            throw new Error(`Failed to save strategy: ${response.status} - ${errorData.detail || errorData.error || 'Server error'}`);
+                        }
+
+                        const savedStrategy = await response.json();
+                        console.log('Strategy saved successfully:', savedStrategy);
+                        alert('Strategy saved successfully!');
+                        showView('strategiesView');
+                        loadAndDisplayCustomStrategies();
+                    } catch (error) {
+                        console.error('Error saving strategy:', error);
+                        alert(`Could not save strategy: ${error.message}`);
+                    }
+                });
+            }
+            // --- Strategy CRUD and Navigation Logic END ---
         });
         
         // The old, separate saveSettingsBtn listener is removed as its functionality 
@@ -1758,6 +1965,5 @@
         // function getDerivApiToken() {
         
     </script>
-</body>
 </body>
 </html>
