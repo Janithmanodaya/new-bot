@@ -76,8 +76,20 @@ DERIV_SYMBOL_MAPPING = {
     "USD/CAD": "frxUSDCAD",
     "BTC/USD": "cryBTCUSD", 
     "ETH/USD": "cryETHUSD",
-    "Gold/USD": "XAUUSD",      # New
-    "Volatility 75 Index": "R_75" # New
+    "Gold/USD": "XAUUSD",
+    "Volatility 10 Index": "R_10",
+    "Volatility 25 Index": "R_25",
+    "Volatility 50 Index": "R_50",
+    "Volatility 75 Index": "R_75",
+    "Volatility 100 Index": "R_100",
+    "Jump 10 Index": "JD10",
+    "Jump 25 Index": "JD25",
+    "Jump 50 Index": "JD50",
+    "Jump 75 Index": "JD75",
+    "Jump 100 Index": "JD100",
+    "Boom 500 Index": "BOOM500",
+    "Crash 500 Index": "CRASH500",
+    "Step Index": "STPRNG"
 }
 
 SYMBOL = "frxUSDJPY" 
