@@ -1047,9 +1047,13 @@
                 !strategyModalActionDetails || !closeStrategyEditModalBtn || !cancelStrategyModalBtn || !saveStrategyModalBtn) {
                 console.error("[DEBUG] CRITICAL: One or more strategy modal elements are missing. Modal functionality will be impaired.");
                 // Optionally, disable buttons that would trigger modal operations if critical parts are missing
-                if (openStrategyModalBtn) openStrategyModalBtn.disabled = true;
-                const navHeaderStrategiesBtn = document.getElementById('navStrategiesBtn');
-                if (navHeaderStrategiesBtn) navHeaderStrategiesBtn.disabled = true;
+                if (openStrategyModalBtn) { // Check if openStrategyModalBtn itself exists before using it
+                    openStrategyModalBtn.disabled = true;
+                }
+                // Use the navHeaderStrategiesBtn from the outer scope, no re-declaration
+                if (navHeaderStrategiesBtn) {
+                    navHeaderStrategiesBtn.disabled = true;
+                }
             }
 
             function openModal() {
@@ -1470,9 +1474,9 @@
                         // Status update logic based on connection and data availability
                        if (connectionStatus.textContent.includes("Data") || connectionStatus.textContent.includes("No Data")) {
                            // Assuming if connectBtn says "Connected", we are good.
-                           if(connectBtn && connectBtn.textContent.includes("Connected")) {
+                           if(connectBtnMain && connectBtnMain.textContent.includes("Connected")) {
                                setStatus('Connected', 'var(--success)');
-                           } else if (connectBtn && connectBtn.textContent.includes("Connect to API")){ // if we are not connected, show neutral
+                           } else if (connectBtnMain && connectBtnMain.textContent.includes("Connect to API")){ // if we are not connected, show neutral
                                 setStatus('Disconnected', 'var(--gray)');
                            } else {
                                setStatus('Data Available', 'var(--gray)'); 
@@ -1481,7 +1485,7 @@
                     } else {
                          // This case might occur if backend returns empty data but not an error
                         document.querySelector('.price-display').textContent = '--';
-                        if(connectBtn && connectBtn.textContent.includes("Connected")) { // Only show "No Data" if we expect to be connected
+                        if(connectBtnMain && connectBtnMain.textContent.includes("Connected")) { // Only show "No Data" if we expect to be connected
                             setStatus('No Data', 'var(--warning)');
                         }
                     }
@@ -1490,7 +1494,7 @@
                     console.error("Error in pollMarketData:", e.message);
                     document.querySelector('.price-display').textContent = 'Error';
                      // If polling fails, and we thought we were connected, update status.
-                    if (connectBtn && connectBtn.textContent.includes("Connected")) {
+                    if (connectBtnMain && connectBtnMain.textContent.includes("Connected")) {
                          setStatus('Data Error', 'var(--danger)');
                     }
                 }
@@ -1995,6 +1999,5 @@
         // function getDerivApiToken() {
         
     </script>
-</body>
 </body>
 </html>
