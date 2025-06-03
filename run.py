@@ -10,12 +10,51 @@ import websocket
 import json
 import queue
 import copy # For deepcopy
+import os
+import uuid
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s')
 
 app = Flask(__name__)
 CORS(app)
+
+# --- Strategy Management Globals and Functions ---
+STRATEGIES_FILE = "custom_strategies.json"
+custom_strategies = {} # In-memory storage for strategies: {strategy_id: strategy_object}
+strategies_lock = threading.Lock() # Lock for accessing custom_strategies and STRATEGIES_FILE
+
+def load_strategies_from_file():
+    global custom_strategies
+    with strategies_lock:
+        if os.path.exists(STRATEGIES_FILE):
+            try:
+                with open(STRATEGIES_FILE, 'r') as f:
+                    custom_strategies = json.load(f)
+                    logging.info(f"Loaded {len(custom_strategies)} strategies from {STRATEGIES_FILE}")
+            except json.JSONDecodeError:
+                logging.error(f"Error decoding JSON from {STRATEGIES_FILE}. Initializing with empty strategies.")
+                custom_strategies = {}
+            except Exception as e:
+                logging.error(f"Error loading strategies from {STRATEGIES_FILE}: {e}. Initializing with empty strategies.")
+                custom_strategies = {}
+        else:
+            logging.info(f"{STRATEGIES_FILE} not found. Initializing with empty strategies.")
+            custom_strategies = {}
+
+def save_strategies_to_file():
+    with strategies_lock:
+        try:
+            with open(STRATEGIES_FILE, 'w') as f:
+                json.dump(custom_strategies, f, indent=4)
+                logging.info(f"Saved {len(custom_strategies)} strategies to {STRATEGIES_FILE}")
+        except Exception as e:
+            logging.error(f"Error saving strategies to {STRATEGIES_FILE}: {e}")
+
+# Load strategies at startup
+load_strategies_from_file()
+# --- End Strategy Management ---
+
 
 # Global variables for request tracking
 next_req_id = 1
@@ -1058,4 +1097,106 @@ def execute_trade():
 start_deriv_ws()
 
 if __name__ == '__main__':
+    # Note: app.run(debug=True) is suitable for development.
+    # For production, use a proper WSGI server like Gunicorn or Waitress.
+    # load_strategies_from_file() # Already called above after app initialization
     app.run(debug=True)
+
+
+# --- Strategy Management API Endpoints ---
+@app.route('/api/strategies', methods=['POST'])
+def create_strategy():
+    global custom_strategies
+    strategy_data = request.get_json()
+
+    if not isinstance(strategy_data, dict) or not strategy_data.get('strategy_name') or not strategy_data.get('conditions_group'):
+        logging.warning(f"Bad request for creating strategy: {strategy_data}")
+        return jsonify({"error": "Invalid strategy payload. 'strategy_name' and 'conditions_group' are required."}), 400
+
+    strategy_id = strategy_data.get('strategy_id', uuid.uuid4().hex)
+
+    with strategies_lock:
+        if strategy_id in custom_strategies:
+             # If user provides an ID that already exists, it's a conflict, unless we decide PUT-like behavior for POST
+             # For strict POST, generate a new ID if one is not provided or if provided one conflicts.
+             # Simpler: if ID is given and exists, error. If not given, generate.
+             if strategy_data.get('strategy_id'): # If ID was in payload
+                logging.warning(f"Attempt to create strategy with existing ID: {strategy_id}")
+                return jsonify({"error": f"Strategy with ID {strategy_id} already exists. Use PUT to update or omit ID for new."}), 409 # Conflict
+             else: # ID was generated
+                 while strategy_id in custom_strategies: # Ensure generated ID is unique (highly unlikely for UUID, but good practice)
+                     strategy_id = uuid.uuid4().hex
+
+        new_strategy = {
+            "strategy_id": strategy_id,
+            "strategy_name": strategy_data.get("strategy_name"),
+            "description": strategy_data.get("description", ""),
+            "conditions_group": strategy_data.get("conditions_group"),
+            "actions": strategy_data.get("actions", []),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        custom_strategies[strategy_id] = new_strategy
+
+    save_strategies_to_file()
+    logging.info(f"Created strategy with ID: {strategy_id}, Name: {new_strategy['strategy_name']}")
+    return jsonify(new_strategy), 201
+
+@app.route('/api/strategies', methods=['GET'])
+def get_all_strategies():
+    with strategies_lock:
+        # Return a list of strategy objects, not the dict itself
+        return jsonify(list(custom_strategies.values()))
+
+@app.route('/api/strategies/<strategy_id>', methods=['GET'])
+def get_strategy_by_id(strategy_id):
+    with strategies_lock:
+        strategy = custom_strategies.get(strategy_id)
+    if strategy:
+        return jsonify(strategy)
+    else:
+        logging.warning(f"Strategy with ID {strategy_id} not found (GET).")
+        return jsonify({"error": "Strategy not found"}), 404
+
+@app.route('/api/strategies/<strategy_id>', methods=['PUT'])
+def update_strategy(strategy_id):
+    global custom_strategies
+    strategy_updates = request.get_json()
+
+    if not isinstance(strategy_updates, dict):
+        return jsonify({"error": "Invalid payload. Expected a JSON object."}), 400
+
+    with strategies_lock:
+        if strategy_id not in custom_strategies:
+            logging.warning(f"Strategy with ID {strategy_id} not found (PUT).")
+            return jsonify({"error": "Strategy not found"}), 404
+
+        existing_strategy = custom_strategies[strategy_id]
+
+        # Update fields if present in the payload
+        existing_strategy["strategy_name"] = strategy_updates.get("strategy_name", existing_strategy["strategy_name"])
+        existing_strategy["description"] = strategy_updates.get("description", existing_strategy["description"])
+        existing_strategy["conditions_group"] = strategy_updates.get("conditions_group", existing_strategy["conditions_group"])
+        existing_strategy["actions"] = strategy_updates.get("actions", existing_strategy["actions"])
+        existing_strategy["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+        custom_strategies[strategy_id] = existing_strategy
+
+    save_strategies_to_file()
+    logging.info(f"Updated strategy with ID: {strategy_id}")
+    return jsonify(existing_strategy)
+
+@app.route('/api/strategies/<strategy_id>', methods=['DELETE'])
+def delete_strategy(strategy_id):
+    global custom_strategies
+    with strategies_lock:
+        if strategy_id not in custom_strategies:
+            logging.warning(f"Strategy with ID {strategy_id} not found (DELETE).")
+            return jsonify({"error": "Strategy not found"}), 404
+
+        deleted_strategy_name = custom_strategies[strategy_id].get("strategy_name", "N/A")
+        del custom_strategies[strategy_id]
+
+    save_strategies_to_file()
+    logging.info(f"Deleted strategy with ID: {strategy_id}, Name: {deleted_strategy_name}")
+    return jsonify({"message": "Strategy deleted successfully"}), 200
