@@ -464,6 +464,71 @@
                 grid-template-columns: 1fr;
             }
         }
+
+    #logViewContainer {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        width: 100%;
+        max-height: 200px; /* Or your preferred max height */
+        background-color: rgba(10, 20, 30, 0.95); /* Dark background */
+        border-top: 1px solid var(--border);
+        box-shadow: 0 -2px 10px rgba(0,0,0,0.3);
+        z-index: 2000; /* Ensure it's above other content */
+        display: flex; /* Use flex for layout */
+        flex-direction: column; /* Stack header and content vertically */
+    }
+
+    #logViewHeader {
+        background-color: var(--secondary); /* Slightly different shade or same as card-bg */
+        padding: 5px 10px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-bottom: 1px solid var(--border);
+        cursor: grab; /* For potential future drag functionality, or just to indicate it's a panel */
+    }
+
+    #logViewHeader span {
+        font-weight: bold;
+        color: var(--light);
+    }
+
+    #logViewHeader button {
+        background: var(--primary);
+        color: white;
+        border: none;
+        border-radius: 4px;
+        padding: 3px 8px;
+        font-size: 12px;
+        cursor: pointer;
+        margin-left: 5px;
+    }
+
+    #logViewHeader button:hover {
+        background: var(--primary-dark);
+    }
+
+    #logViewContent {
+        flex-grow: 1; /* Allow content to take available space */
+        overflow-y: auto; /* Scroll for log messages */
+        padding: 8px;
+        font-family: 'Courier New', Courier, monospace; /* Monospace for logs */
+        font-size: 13px; /* Readable log size */
+        color: var(--light);
+    }
+
+    .log-message {
+        padding: 2px 0;
+        border-bottom: 1px dotted rgba(255,255,255,0.1);
+        white-space: pre-wrap; /* Preserve whitespace and wrap lines */
+        word-break: break-all; /* Break long words/strings */
+    }
+
+    .log-message.ERROR { color: var(--danger); font-weight: bold; }
+    .log-message.WARN { color: var(--warning); }
+    .log-message.INFO { color: #60a5fa; /* A lighter blue */ }
+    /* .log-message.LOG will use default color (var(--light)) */
     </style>
 </head>
 <body>
@@ -1021,6 +1086,94 @@
         }
 
         document.addEventListener('DOMContentLoaded', async function() {
+            // --- Log View Functionality ---
+            const logViewContainer = document.getElementById('logViewContainer');
+            const logViewContent = document.getElementById('logViewContent');
+            const toggleLogViewBtn = document.getElementById('toggleLogViewBtn');
+            const clearLogViewBtn = document.getElementById('clearLogViewBtn');
+            let isLogViewVisible = false;
+
+            function appendToLogView(message, level = 'LOG') {
+                if (!logViewContent) return;
+
+                const messageEl = document.createElement('div');
+                messageEl.className = 'log-message ' + level.toUpperCase();
+                
+                const timestamp = new Date().toLocaleTimeString();
+                let formattedMessage = `[${timestamp}] [${level.toUpperCase()}] `;
+
+                if (typeof message === 'object') {
+                    try {
+                        formattedMessage += JSON.stringify(message, null, 2);
+                    } catch (e) {
+                        formattedMessage += 'Unserializable Object';
+                    }
+                } else {
+                    formattedMessage += message;
+                }
+                
+                messageEl.textContent = formattedMessage;
+                logViewContent.appendChild(messageEl);
+                logViewContent.scrollTop = logViewContent.scrollHeight; // Auto-scroll to bottom
+            }
+
+            if (toggleLogViewBtn && logViewContainer) {
+                // Show log view by default for easier debugging during development
+                // Change this to false for production if desired.
+                isLogViewVisible = true; 
+                logViewContainer.style.display = 'flex';
+                toggleLogViewBtn.textContent = '_';
+
+
+                toggleLogViewBtn.addEventListener('click', () => {
+                    isLogViewVisible = !isLogViewVisible;
+                    if (isLogViewVisible) {
+                        logViewContainer.style.display = 'flex';
+                        toggleLogViewBtn.textContent = '_'; // Indicate hide
+                    } else {
+                        logViewContainer.style.display = 'none';
+                        toggleLogViewBtn.textContent = '^'; // Indicate show
+                    }
+                });
+            }
+
+            if (clearLogViewBtn && logViewContent) {
+                clearLogViewBtn.addEventListener('click', () => {
+                    logViewContent.innerHTML = '';
+                    appendToLogView('Log cleared.', 'INFO');
+                });
+            }
+
+            // Hijack console methods
+            const originalConsoleLog = console.log;
+            const originalConsoleError = console.error;
+            const originalConsoleWarn = console.warn;
+            const originalConsoleInfo = console.info;
+
+            console.log = function(...args) {
+                originalConsoleLog.apply(console, args);
+                appendToLogView(args.map(arg => typeof arg === 'object' ? JSON.stringify(arg, null, 2) : arg).join(' '), 'LOG');
+            };
+
+            console.error = function(...args) {
+                originalConsoleError.apply(console, args);
+                appendToLogView(args.map(arg => arg instanceof Error ? arg.stack || arg.message : typeof arg === 'object' ? JSON.stringify(arg, null, 2) : arg).join(' '), 'ERROR');
+            };
+
+            console.warn = function(...args) {
+                originalConsoleWarn.apply(console, args);
+                appendToLogView(args.map(arg => typeof arg === 'object' ? JSON.stringify(arg, null, 2) : arg).join(' '), 'WARN');
+            };
+
+            console.info = function(...args) {
+                originalConsoleInfo.apply(console, args);
+                appendToLogView(args.map(arg => typeof arg === 'object' ? JSON.stringify(arg, null, 2) : arg).join(' '), 'INFO');
+            };
+
+            // Initial log message to test the view
+            console.log("Log view initialized. All console messages will appear here and in the browser console.");
+            // --- End Log View Functionality ---
+
             // Modal Elements
             const strategyEditModal = document.getElementById('strategyEditModal');
             const strategyModalTitle = document.getElementById('strategyModalTitle');
@@ -1047,9 +1200,13 @@
                 !strategyModalActionDetails || !closeStrategyEditModalBtn || !cancelStrategyModalBtn || !saveStrategyModalBtn) {
                 console.error("[DEBUG] CRITICAL: One or more strategy modal elements are missing. Modal functionality will be impaired.");
                 // Optionally, disable buttons that would trigger modal operations if critical parts are missing
-                if (openStrategyModalBtn) openStrategyModalBtn.disabled = true;
-                const navHeaderStrategiesBtn = document.getElementById('navStrategiesBtn');
-                if (navHeaderStrategiesBtn) navHeaderStrategiesBtn.disabled = true;
+                if (openStrategyModalBtn) { // Check if openStrategyModalBtn itself exists before using it
+                    openStrategyModalBtn.disabled = true;
+                }
+                // Use the navHeaderStrategiesBtn from the outer scope, no re-declaration
+                if (navHeaderStrategiesBtn) { 
+                    navHeaderStrategiesBtn.disabled = true;
+                }
             }
 
             function openModal() {
@@ -1470,9 +1627,9 @@
                         // Status update logic based on connection and data availability
                        if (connectionStatus.textContent.includes("Data") || connectionStatus.textContent.includes("No Data")) {
                            // Assuming if connectBtn says "Connected", we are good.
-                           if(connectBtn && connectBtn.textContent.includes("Connected")) {
+                           if(connectBtnMain && connectBtnMain.textContent.includes("Connected")) {
                                setStatus('Connected', 'var(--success)');
-                           } else if (connectBtn && connectBtn.textContent.includes("Connect to API")){ // if we are not connected, show neutral
+                           } else if (connectBtnMain && connectBtnMain.textContent.includes("Connect to API")){ // if we are not connected, show neutral
                                 setStatus('Disconnected', 'var(--gray)');
                            } else {
                                setStatus('Data Available', 'var(--gray)'); 
@@ -1481,7 +1638,7 @@
                     } else {
                          // This case might occur if backend returns empty data but not an error
                         document.querySelector('.price-display').textContent = '--';
-                        if(connectBtn && connectBtn.textContent.includes("Connected")) { // Only show "No Data" if we expect to be connected
+                        if(connectBtnMain && connectBtnMain.textContent.includes("Connected")) { // Only show "No Data" if we expect to be connected
                             setStatus('No Data', 'var(--warning)');
                         }
                     }
@@ -1490,7 +1647,7 @@
                     console.error("Error in pollMarketData:", e.message);
                     document.querySelector('.price-display').textContent = 'Error';
                      // If polling fails, and we thought we were connected, update status.
-                    if (connectBtn && connectBtn.textContent.includes("Connected")) {
+                    if (connectBtnMain && connectBtnMain.textContent.includes("Connected")) {
                          setStatus('Data Error', 'var(--danger)');
                     }
                 }
@@ -1785,107 +1942,163 @@
             // strategiesView and strategyBuilderView are removed, so no need to hide them.
 
             async function loadAndDisplayCustomStrategies() {
-       console.log('[DEBUG] loadAndDisplayCustomStrategies: Function called (targeting panel).');
-       
-       const container = document.getElementById('liveStrategiesListContainer');
-       if (!container) {
-           console.error('[DEBUG] loadAndDisplayCustomStrategies: CRITICAL - liveStrategiesListContainer element NOT found in liveStrategiesPanel. Cannot display strategies.');
-           return; 
-       }
+                console.log('[DEBUG] loadAndDisplayCustomStrategies: Rewritten function called (targeting panel).');
+                
+                const container = document.getElementById('liveStrategiesListContainer');
+                if (!container) {
+                    console.error('[DEBUG] loadAndDisplayCustomStrategies (Rewritten): CRITICAL - liveStrategiesListContainer element NOT found. Cannot display strategies.');
+                    return; 
+                }
 
-       container.innerHTML = '<p style="color: var(--gray); text-align:center; padding: 10px;">Loading strategies...</p>';
-       console.log('[DEBUG] loadAndDisplayCustomStrategies: "Loading strategies..." message set in panel.');
+                container.innerHTML = '<p style="color: var(--gray); text-align:center; padding: 10px;">Loading strategies...</p>';
+                console.log('[DEBUG] loadAndDisplayCustomStrategies (Rewritten): "Loading strategies..." message set.');
 
-       try {
-           console.log('[DEBUG] loadAndDisplayCustomStrategies: Attempting to fetch /api/strategies.');
-           const response = await fetch('/api/strategies');
-           console.log('[DEBUG] loadAndDisplayCustomStrategies: Fetch response status:', response.status);
-           if (!response.ok) {
-               const errorText = await response.text();
-               console.error(`[DEBUG] loadAndDisplayCustomStrategies: API error response text: ${errorText}`);
-               throw new Error(`HTTP error! status: ${response.status}. Body: ${errorText}`);
-           }
-           const strategies = await response.json();
-           console.log('[DEBUG] loadAndDisplayCustomStrategies: Strategies fetched successfully:', strategies);
-           
-           container.innerHTML = ''; // Clear loading message
+                try {
+                    console.log('[DEBUG] loadAndDisplayCustomStrategies (Rewritten): Attempting to fetch /api/strategies.');
+                    const response = await fetch('/api/strategies');
+                    console.log('[DEBUG] loadAndDisplayCustomStrategies (Rewritten): Fetch response status:', response.status);
 
-           if (strategies.length === 0) {
-               container.innerHTML = '<p style="color: var(--gray); text-align: center; padding: 10px;">No strategies defined yet. Click "Add New Strategy" to create one.</p>';
-               console.log('[DEBUG] loadAndDisplayCustomStrategies: "No strategies found" message set in panel.');
-           } else {
-               console.log('[DEBUG] loadAndDisplayCustomStrategies: Rendering strategy items in panel. Count:', strategies.length);
-               strategies.forEach(strategy => {
-                   const strategyItemEl = document.createElement('div');
-                   strategyItemEl.className = 'strategy-list-item'; // New class for styling items in the list
-                   strategyItemEl.style.border = '1px solid var(--border)';
-                   strategyItemEl.style.borderRadius = '8px';
-                   strategyItemEl.style.padding = '15px';
-                   strategyItemEl.style.backgroundColor = 'rgba(30, 41, 59, 0.3)'; // Slightly different background
+                    if (!response.ok) {
+                        let errorText = 'Failed to fetch strategies.';
+                        try {
+                            errorText = await response.text(); // Try to get more specific error text
+                        } catch (textError) {
+                            console.warn('[DEBUG] loadAndDisplayCustomStrategies (Rewritten): Could not parse error text from server.', textError);
+                        }
+                        console.error(`[DEBUG] loadAndDisplayCustomStrategies (Rewritten): API error. Status: ${response.status}, Response: ${errorText}`);
+                        throw new Error(`HTTP error! status: ${response.status}. Body: ${errorText}`);
+                    }
 
-                   let statusText = strategy.is_active ? 'Active' : 'Disabled';
-                   let statusColor = strategy.is_active ? 'var(--success)' : 'var(--warning)';
-                   if (strategy.status_message && strategy.status_message !== statusText) {
-                        if (strategy.is_active && strategy.status_message === "Active") {/* default is fine */}
-                        else if (!strategy.is_active && strategy.status_message === "Disabled by user") { statusText = 'Disabled';}
-                        else { statusText = `${strategy.is_active ? 'Active' : 'Disabled'} (${strategy.status_message})`;}
-                   }
-                   
-                   // Simplified condition/action display for the panel
-                   let conditionsSummary = "No conditions";
-                   if (strategy.conditions_group && strategy.conditions_group.conditions && strategy.conditions_group.conditions.length > 0) {
-                       conditionsSummary = strategy.conditions_group.conditions.map(c => `${c.indicator} ${c.operator} ${c.value}`).join(', ');
-                       if (conditionsSummary.length > 50) conditionsSummary = conditionsSummary.substring(0, 47) + "...";
-                   }
-                   let actionsSummary = "No actions";
-                   if (strategy.actions && strategy.actions.length > 0) {
-                       actionsSummary = strategy.actions.map(a => a.type).join(', ');
-                        if (actionsSummary.length > 30) actionsSummary = actionsSummary.substring(0, 27) + "...";
-                   }
+                    const strategies = await response.json();
+                    console.log('[DEBUG] loadAndDisplayCustomStrategies (Rewritten): Strategies fetched successfully:', strategies);
+                    
+                    container.innerHTML = ''; // Clear loading message
 
-                   let content = `
-                       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                           <h5 style="font-size: 1.1em; color: var(--light); margin:0;">${strategy.strategy_name || 'Unnamed Strategy'}</h5>
-                           <span style="font-size: 0.8em; color: ${statusColor}; font-weight: bold;">${statusText.toUpperCase()}</span>
-                       </div>
-                       <p style="font-size: 0.85em; color: var(--gray); margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${strategy.description || ''}">${strategy.description || 'No description.'}</p>
-                       <p style="font-size: 0.8em; color: var(--gray); margin-bottom: 4px;" title="${conditionsSummary}">Conditions: ${conditionsSummary}</p>
-                       <p style="font-size: 0.8em; color: var(--gray); margin-bottom: 12px;" title="${actionsSummary}">Actions: ${actionsSummary}</p>
-                       <div style="display: flex; justify-content: flex-start; gap: 8px; margin-top: 10px;">`;
+                    if (!strategies || strategies.length === 0) {
+                        container.innerHTML = '<p style="color: var(--gray); text-align: center; padding: 10px;">No strategies defined yet. Click "Add New Strategy" to create one.</p>';
+                        console.log('[DEBUG] loadAndDisplayCustomStrategies (Rewritten): "No strategies found" message set.');
+                    } else {
+                        console.log('[DEBUG] loadAndDisplayCustomStrategies (Rewritten): Rendering strategy items. Count:', strategies.length);
+                        strategies.forEach((strategy, index) => { // Added index for logging
+                            try {
+                                // START OF FOR-EACH CALLBACK BODY (now inside try)
+                                console.info(`[DEBUG] Processing strategy at index ${index}:`, strategy ? strategy.strategy_name || strategy.strategy_id : 'Unknown strategy');
+                                if (!strategy || typeof strategy.strategy_id === 'undefined') {
+                                    console.warn(`[DEBUG] loadAndDisplayCustomStrategies (Rewritten): Skipping invalid strategy object at index ${index}:`, strategy);
+                                    return; // Skip this iteration
+                                }
 
-                   if (strategy.is_active) {
-                       content += `<button class="btn btn-sm btn-outline toggle-strategy-active-btn" data-id="${strategy.strategy_id}" data-action="disable" style="border-color: var(--warning); color: var(--warning);"><i class="fas fa-stop-circle"></i> Stop</button>`;
-                   } else {
-                       content += `<button class="btn btn-sm btn-outline toggle-strategy-active-btn" data-id="${strategy.strategy_id}" data-action="enable" style="border-color: var(--success); color: var(--success);"><i class="fas fa-play-circle"></i> Run</button>`;
-                   }
-                   
-                   content += `
-                           <button class="btn btn-sm btn-outline edit-strategy-btn" data-id="${strategy.strategy_id}"><i class="fas fa-edit"></i> Edit</button>
-                           <button class="btn btn-sm btn-outline delete-strategy-btn" data-id="${strategy.strategy_id}" style="border-color:var(--danger); color:var(--danger); margin-left: auto;"><i class="fas fa-trash"></i> Delete</button>
-                       </div>`;
-                   
-                   strategyItemEl.innerHTML = content;
-                   container.appendChild(strategyItemEl);
+                                const strategyItemEl = document.createElement('div');
+                            strategyItemEl.className = 'strategy-list-item';
+                            strategyItemEl.style.border = '1px solid var(--border)';
+                            strategyItemEl.style.borderRadius = '8px';
+                            strategyItemEl.style.padding = '15px';
+                            strategyItemEl.style.backgroundColor = 'rgba(30, 41, 59, 0.3)';
 
-                   // Attach event listeners
-                   strategyItemEl.querySelector('.edit-strategy-btn').addEventListener('click', function() {
-                       // Logic to open modal for editing - will be fully implemented when modal is ready
-                       console.log('[DEBUG] Edit button clicked for strategy ID (panel):', this.dataset.id);
-                       openStrategyModalForEdit(this.dataset.id); // Assumes this function will be created
-                   });
-                   strategyItemEl.querySelector('.delete-strategy-btn').addEventListener('click', function() {
-                       handleDeleteStrategy(this.dataset.id); 
-                   });
-                   strategyItemEl.querySelector('.toggle-strategy-active-btn').addEventListener('click', function() {
-                       handleToggleStrategyActive(this.dataset.id, this.dataset.action);
-                   });
-               });
-           }
-       } catch (error) {
-           console.error('[DEBUG] loadAndDisplayCustomStrategies (panel): Error caught:', error.message, error.stack);
-           container.innerHTML = `<p style="color: var(--danger); text-align: center; padding: 10px;">Failed to load strategies: ${error.message}</p>`;
-       }
-   }
+                            let statusText = strategy.is_active ? 'Active' : 'Disabled';
+                            let statusColor = strategy.is_active ? 'var(--success)' : 'var(--warning)';
+                            // Ensure status_message is a string before using it
+                            const statusMessage = (typeof strategy.status_message === 'string' && strategy.status_message) ? strategy.status_message : '';
+                            if (statusMessage && statusMessage !== statusText) {
+                                if (strategy.is_active && statusMessage === "Active") {
+                                    // default is fine
+                                } else if (!strategy.is_active && statusMessage === "Disabled by user") {
+                                    statusText = 'Disabled';
+                                } else { 
+                                    statusText = `${strategy.is_active ? 'Active' : 'Disabled'} (${statusMessage})`;
+                                }
+                            }
+                           
+                            let conditionsSummary = "No conditions";
+                            if (strategy.conditions_group && strategy.conditions_group.conditions && Array.isArray(strategy.conditions_group.conditions) && strategy.conditions_group.conditions.length > 0) {
+                                conditionsSummary = strategy.conditions_group.conditions.map(c => `${c.indicator || 'N/A'} ${c.operator || '?'} ${c.value || 'N/A'}`).join(', ');
+                                if (conditionsSummary.length > 50) conditionsSummary = conditionsSummary.substring(0, 47) + "...";
+                            }
+
+                            let actionsSummary = "No actions";
+                            if (strategy.actions && Array.isArray(strategy.actions) && strategy.actions.length > 0) {
+                                actionsSummary = strategy.actions.map(a => a.type || 'N/A').join(', ');
+                                if (actionsSummary.length > 30) actionsSummary = actionsSummary.substring(0, 27) + "...";
+                            }
+
+                            const strategyName = typeof strategy.strategy_name === 'string' && strategy.strategy_name ? strategy.strategy_name : 'Unnamed Strategy';
+                            const description = typeof strategy.description === 'string' && strategy.description ? strategy.description : 'No description.';
+
+                            let content = `
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                                    <h5 style="font-size: 1.1em; color: var(--light); margin:0;">${strategyName}</h5>
+                                    <span style="font-size: 0.8em; color: ${statusColor}; font-weight: bold;">${statusText.toUpperCase()}</span>
+                                </div>
+                                <p style="font-size: 0.85em; color: var(--gray); margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${description}">${description}</p>
+                                <p style="font-size: 0.8em; color: var(--gray); margin-bottom: 4px;" title="${conditionsSummary}">Conditions: ${conditionsSummary}</p>
+                                <p style="font-size: 0.8em; color: var(--gray); margin-bottom: 12px;" title="${actionsSummary}">Actions: ${actionsSummary}</p>
+                                <div style="display: flex; justify-content: flex-start; gap: 8px; margin-top: 10px;">`;
+
+                            if (strategy.is_active) {
+                                content += `<button class="btn btn-sm btn-outline toggle-strategy-active-btn" data-id="${strategy.strategy_id}" data-action="disable" style="border-color: var(--warning); color: var(--warning);"><i class="fas fa-stop-circle"></i> Stop</button>`;
+                            } else {
+                                content += `<button class="btn btn-sm btn-outline toggle-strategy-active-btn" data-id="${strategy.strategy_id}" data-action="enable" style="border-color: var(--success); color: var(--success);"><i class="fas fa-play-circle"></i> Run</button>`;
+                            }
+                           
+                            content += `
+                                    <button class="btn btn-sm btn-outline edit-strategy-btn" data-id="${strategy.strategy_id}"><i class="fas fa-edit"></i> Edit</button>
+                                    <button class="btn btn-sm btn-outline delete-strategy-btn" data-id="${strategy.strategy_id}" style="border-color:var(--danger); color:var(--danger); margin-left: auto;"><i class="fas fa-trash"></i> Delete</button>
+                                </div>`;
+                           
+                            strategyItemEl.innerHTML = content;
+                            container.appendChild(strategyItemEl);
+
+                            // Attach event listeners
+                            const editBtn = strategyItemEl.querySelector('.edit-strategy-btn');
+                            if (editBtn) {
+                                editBtn.addEventListener('click', function() {
+                                    if (typeof window.openStrategyModalForEdit === 'function') {
+                                        window.openStrategyModalForEdit(this.dataset.id);
+                                    } else {
+                                        console.error('[DEBUG] openStrategyModalForEdit function not found on window.');
+                                    }
+                                });
+                            }
+
+                            const deleteBtn = strategyItemEl.querySelector('.delete-strategy-btn');
+                            if (deleteBtn) {
+                                deleteBtn.addEventListener('click', function() {
+                                    if (typeof window.handleDeleteStrategy === 'function') {
+                                        window.handleDeleteStrategy(this.dataset.id);
+                                    } else {
+                                        console.error('[DEBUG] handleDeleteStrategy function not found on window.');
+                                    }
+                                });
+                            }
+
+                            const toggleBtn = strategyItemEl.querySelector('.toggle-strategy-active-btn');
+                            if (toggleBtn) {
+                                toggleBtn.addEventListener('click', function() {
+                                    if (typeof window.handleToggleStrategyActive === 'function') {
+                                        window.handleToggleStrategyActive(this.dataset.id, this.dataset.action);
+                                    } else {
+                                        console.error('[DEBUG] handleToggleStrategyActive function not found on window.');
+                                    }
+                                });
+                            }
+                            // END OF FOR-EACH CALLBACK BODY
+                            } catch (e) {
+                                console.error(`Error processing strategy item at index ${index}:`, strategy ? strategy.strategy_name || strategy.strategy_id : 'Unknown strategy', e);
+                                // Optionally, you could append a placeholder error message to the container for this specific item:
+                                // const errorItemEl = document.createElement('div');
+                                // errorItemEl.className = 'strategy-list-item log-message ERROR';
+                                // errorItemEl.textContent = `Error loading strategy: ${strategy ? strategy.strategy_name || 'Unnamed' : 'Unknown'}. Check logs.`;
+                                // container.appendChild(errorItemEl);
+                            }
+                        });
+                    }
+                } catch (error) {
+                    console.error('[DEBUG] loadAndDisplayCustomStrategies (Rewritten): Error caught:', error.message, error.stack ? error.stack : '(No stack trace)');
+                    if (container) { // Ensure container is still valid before trying to update its innerHTML
+                        container.innerHTML = `<p style="color: var(--danger); text-align: center; padding: 10px;">Failed to load strategies: ${error.message}</p>`;
+                    }
+                }
+            }
 
             // Modify navStrategiesBtn event listener to call loadAndDisplayCustomStrategies
             // The navStrategiesBtn listener was updated in the previous step (Subtask 3 of this Stage)
@@ -1986,15 +2199,38 @@
 
             // --- End Globally Accessible Functions ---
 
-            loadAndDisplayCustomStrategies(); // Populate the panel on page load
-        });
+            try {
+                console.info("Attempting to start market data polling...");
+                pollMarketData(); // Start polling
+                console.info("Market data polling initiated.");
+            } catch (e) {
+                console.error("Error starting market data polling:", e);
+            }
+
+            try {
+                console.info("Attempting to load and display custom strategies...");
+                loadAndDisplayCustomStrategies(); // Populate the panel on page load
+                console.info("Custom strategies loading initiated.");
+            } catch (e) {
+                console.error("Error calling loadAndDisplayCustomStrategies:", e);
+            }
+        }});
         
         // The old, separate saveSettingsBtn listener is removed as its functionality 
         // is now part of the saveAndConnectBtn logic triggered from connectBtn flow.
         // Utility to get token (can be removed if not used elsewhere)
-        // function getDerivApiToken() {
+    
         
-    </script>
-</body>
+</script>
+    <div id="logViewContainer" style="display: none; /* Initially hidden, JS can show it */">
+        <div id="logViewHeader">
+            <span>Console Log</span>
+            <button id="toggleLogViewBtn" title="Toggle Log View">-</button>
+            <button id="clearLogViewBtn" title="Clear Log">Clear</button>
+        </div>
+        <div id="logViewContent">
+            <!-- Log messages will be appended here -->
+        </div>
+    </div>
 </body>
 </html>
