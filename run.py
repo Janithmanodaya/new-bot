@@ -30,8 +30,11 @@ api_response_data = {}   # req_id: data_from_ws
 current_chart_type = 'tick'  # Default: 'tick' or 'ohlcv'
 current_granularity_seconds = 60 # Default: e.g., 60 for 1-minute candles
 TIMEFRAME_TO_SECONDS = {
-    '1M': 60, '5M': 300, '15M': 900, '1H': 3600, '4H': 14400, '1D': 86400, '1W': 604800
+    '1M': 60, '5M': 300, '10M': 600, '15M': 900, '30M': 1800, '1H': 3600, '4H': 14400, '1D': 86400, '1W': 604800
 }
+
+MAX_OHLCV_CANDLES = 500 # Max number of historical + aggregated candles to keep
+in_progress_ohlcv_candle = None # Holds the currently forming OHLCV candle from ticks
 
 DEFAULT_MARKET_DATA = {
     'timestamps': [], 'prices': [], 'volumes': [], # For tick chart and general use
@@ -102,9 +105,8 @@ def calculate_indicators(data_input):
     low_prices = []
     close_prices_for_atr = [] # Separate for clarity if needed by ATR logic
 
-    if not data_input:
-        logging.warning("[Indicators] Data input is empty. Cannot calculate indicators.")
-        # Return default empty structure for all indicators
+    if not data_input or (isinstance(data_input, list) and not data_input): # Check if data_input itself is empty or an empty list
+        logging.warning("[Indicators] Data input is empty list or None. Cannot calculate indicators.")
         empty_results = {}
         for k, v_default in DEFAULT_MARKET_DATA.items():
             if k not in ['timestamps', 'prices', 'volumes', 'ohlcv_candles', 'high_24h', 'low_24h', 'volume_24h']:
@@ -112,30 +114,41 @@ def calculate_indicators(data_input):
                 elif isinstance(v_default, str): empty_results[k] = 'N/A'
         return empty_results
 
+    # Determine data type (list of floats or list of dicts)
+    # This check needs to be careful if data_input is a list that could be empty after filtering
     if isinstance(data_input[0], dict): # OHLCV data
         is_ohlcv_data = True
         try:
-            prices_list = [d['close'] for d in data_input]
-            high_prices = [d['high'] for d in data_input]
-            low_prices = [d['low'] for d in data_input]
-            close_prices_for_atr = prices_list # Used for previous close in TR calc
-            logging.debug(f"calculate_indicators received OHLCV data. Count: {len(data_input)}")
+            # Ensure all candles have the required keys. Filter out malformed ones if necessary.
+            # For now, assume if it's dict, it's mostly correct.
+            prices_list = [d['close'] for d in data_input if isinstance(d, dict) and 'close' in d]
+            if not prices_list: # If all items were malformed
+                 logging.error("[Indicators] OHLCV data provided, but no valid 'close' prices found.")
+                 raise KeyError("No valid 'close' in OHLCV data")
+
+            high_prices = [d['high'] for d in data_input if isinstance(d, dict) and 'high' in d]
+            low_prices = [d['low'] for d in data_input if isinstance(d, dict) and 'low' in d]
+            # Check if H/L were also validly extracted matching prices_list length
+            if not (len(prices_list) == len(high_prices) == len(low_prices)):
+                logging.warning("[Indicators] Mismatch in HLC data lengths from OHLCV input. ATR/CCI might be affected.")
+                # Decide if is_ohlcv_data should be False if H/L are not complete. For ATR, it will fail later if lengths differ.
+
+            close_prices_for_atr = prices_list
+            logging.debug(f"calculate_indicators received OHLCV data. Count: {len(data_input)}, Valid close prices: {len(prices_list)}")
         except KeyError as e:
-            logging.error(f"[Indicators] OHLCV data missing key: {e}. Cannot calculate all indicators.")
-            # Fallback to just close prices if possible, or return empty for ATR.
-            # For simplicity, if structure is wrong, we might not proceed with ATR.
-            is_ohlcv_data = False # Revert, as we don't have full HLC
-            if not prices_list: # If 'close' also failed
+            logging.error(f"[Indicators] OHLCV data missing key: {e}. Cannot calculate all indicators reliably.")
+            is_ohlcv_data = False
+            if not prices_list: # If 'close' also failed during extraction
                  return {k: [] if isinstance(DEFAULT_MARKET_DATA[k], list) else 'N/A' for k in DEFAULT_MARKET_DATA if k not in ['timestamps', 'prices', 'volumes', 'ohlcv_candles', 'high_24h', 'low_24h', 'volume_24h']}
     elif isinstance(data_input[0], float): # List of close prices
         prices_list = data_input
         logging.debug(f"calculate_indicators received list of close prices. Count: {len(prices_list)}")
     else:
-        logging.error(f"[Indicators] Unknown data_input type: {type(data_input[0])}. Cannot calculate indicators.")
+        logging.error(f"[Indicators] Unknown data_input type: {type(data_input[0] if data_input else 'None')}. Cannot calculate indicators.")
         return {k: [] if isinstance(DEFAULT_MARKET_DATA[k], list) else 'N/A' for k in DEFAULT_MARKET_DATA if k not in ['timestamps', 'prices', 'volumes', 'ohlcv_candles', 'high_24h', 'low_24h', 'volume_24h']}
 
-    if not prices_list: # Should have been caught by initial check, but as a safeguard
-        logging.warning("[Indicators] Price list (derived) is empty. Cannot calculate indicators.")
+    if not prices_list:
+        logging.warning("[Indicators] Price list (derived after type check) is empty. Cannot calculate indicators.")
         return {k: [] if isinstance(DEFAULT_MARKET_DATA[k], list) else 'N/A' for k in DEFAULT_MARKET_DATA if k not in ['timestamps', 'prices', 'volumes', 'ohlcv_candles', 'high_24h', 'low_24h', 'volume_24h']}
 
     prices_series = pd.Series(prices_list, dtype=float)
@@ -349,11 +362,11 @@ def on_open_for_deriv(ws):
 
 def on_message_for_deriv(ws, message):
     global market_data, SYMBOL, current_tick_subscription_id, current_chart_type, current_granularity_seconds, pending_api_requests
-    global market_data, SYMBOL, current_tick_subscription_id, current_chart_type, current_granularity_seconds
-    global pending_api_requests, api_response_events, api_response_data, shared_data_lock
+    global market_data, SYMBOL, current_tick_subscription_id, current_chart_type, current_granularity_seconds, in_progress_ohlcv_candle
+    global pending_api_requests, api_response_events, api_response_data, shared_data_lock, market_data_lock
     
     data = json.loads(message)
-    logging.debug(f"Raw WS message received: {message[:500]}") # Log more of the message
+    # logging.debug(f"Raw WS message received: {message[:500]}") # Can be too verbose
 
     req_id_of_message = data.get('echo_req', {}).get('req_id')
     request_details = None
@@ -436,56 +449,81 @@ def on_message_for_deriv(ws, message):
 
 
     elif msg_type == 'tick':
-        tick = data.get('tick')
-        if not tick or tick.get('epoch') is None or tick.get('quote') is None:
+        tick_data = data.get('tick')
+        if not tick_data or tick_data.get('epoch') is None or tick_data.get('quote') is None:
             logging.error(f"Invalid tick data: {data}")
             return
         
-        ts = datetime.fromtimestamp(tick['epoch'], timezone.utc)
-        
-        with market_data_lock:
-            if current_chart_type == 'tick': 
-                market_data['timestamps'].append(ts.isoformat())
-                market_data['prices'].append(tick['quote'])
-                for k_list in ['timestamps', 'prices']: 
-                    if len(market_data[k_list]) > 100: market_data[k_list] = market_data[k_list][-100:]
-            
-            prices_for_indicators = []
-            if current_chart_type == 'ohlcv':
-                # When chart is OHLCV, indicators should be based on the OHLCV data itself
-                ohlcv_data_for_indicators = market_data.get('ohlcv_candles')
-                if ohlcv_data_for_indicators and len(ohlcv_data_for_indicators) > 0:
-                    logging.debug(f"Tick received; chart type is OHLCV. Using {len(ohlcv_data_for_indicators)} ohlcv_candles for indicators.")
-                    indicator_input_data = ohlcv_data_for_indicators
-                else: # Fallback if ohlcv_candles is empty, use recent ticks' close prices
-                    current_tick_prices = market_data['prices']
-                    # Ensure we have enough data for at least some basic indicators if possible
-                    # Using a slice that might be too short for some indicators, but calculate_indicators handles it.
-                    indicator_input_data = current_tick_prices[-(min(100, len(current_tick_prices))):]
-                    logging.debug(f"Tick received; chart type OHLCV, but no candles. Using last {len(indicator_input_data)} tick prices for indicators.")
-            else: # current_chart_type == 'tick'
-                # When chart is Tick, indicators are based on recent tick prices (close prices)
-                current_tick_prices = market_data['prices']
-                indicator_input_data = current_tick_prices[-(min(100, len(current_tick_prices))):]
-                # logging.debug(f"Tick received; chart type is Tick. Using last {len(indicator_input_data)} tick prices for indicators.")
+        tick_time_dt = datetime.fromtimestamp(tick_data['epoch'], timezone.utc)
+        tick_price = float(tick_data['quote'])
+        # tick_volume = float(tick_data.get('volume', 1.0)) # If volume per tick is available
 
-            updated_data = {} 
-            if not indicator_input_data:
+        with market_data_lock:
+            # Always update latest tick prices for non-OHLCV indicators if needed, or for current price display
+            market_data['timestamps'].append(tick_time_dt.isoformat())
+            market_data['prices'].append(tick_price)
+            # Cap timestamps and prices for tick chart (e.g., last 200-300 points for performance)
+            # This cap should be different from MAX_OHLCV_CANDLES
+            max_tick_points = 300
+            if len(market_data['timestamps']) > max_tick_points:
+                market_data['timestamps'] = market_data['timestamps'][-max_tick_points:]
+                market_data['prices'] = market_data['prices'][-max_tick_points:]
+            
+            if 'volumes' in market_data: # This is dummy volume for tick chart
+                 market_data['volumes'].append(np.random.randint(1000,5000))
+                 if len(market_data['volumes']) > max_tick_points: market_data['volumes'] = market_data['volumes'][-max_tick_points:]
+
+            indicator_input_data_for_calc = [] # This will be passed to calculate_indicators
+
+            if current_chart_type == 'ohlcv':
+                granularity_td = timedelta(seconds=current_granularity_seconds)
+                # Calculate the start of the interval for the current tick
+                interval_start_epoch = int(tick_data['epoch'] / current_granularity_seconds) * current_granularity_seconds
+                interval_start_time_dt = datetime.fromtimestamp(interval_start_epoch, timezone.utc)
+                interval_start_time_ms = int(interval_start_time_dt.timestamp() * 1000)
+
+                if in_progress_ohlcv_candle is None or interval_start_time_ms > in_progress_ohlcv_candle['time']:
+                    # New candle interval begins
+                    if in_progress_ohlcv_candle is not None: # Finalize previous candle
+                        logging.info(f"Finalizing candle for {in_progress_ohlcv_candle['time']} due to new interval starting at {interval_start_time_ms}.")
+                        market_data['ohlcv_candles'].append(in_progress_ohlcv_candle)
+                        # Sort and cap (though appending should keep it sorted if historical data was sorted)
+                        market_data['ohlcv_candles'].sort(key=lambda c: c['time'])
+                        if len(market_data['ohlcv_candles']) > MAX_OHLCV_CANDLES:
+                            market_data['ohlcv_candles'] = market_data['ohlcv_candles'][-MAX_OHLCV_CANDLES:]
+
+                    logging.info(f"Starting new OHLCV candle for interval: {interval_start_time_dt} (granularity: {current_granularity_seconds}s)")
+                    in_progress_ohlcv_candle = {
+                        'time': interval_start_time_ms, 'open': tick_price, 'high': tick_price,
+                        'low': tick_price, 'close': tick_price, 'volume': 1 # Using 1 as placeholder volume per tick
+                    }
+                elif interval_start_time_ms == in_progress_ohlcv_candle['time']:
+                    # Tick is within the current candle interval
+                    in_progress_ohlcv_candle['high'] = max(in_progress_ohlcv_candle['high'], tick_price)
+                    in_progress_ohlcv_candle['low'] = min(in_progress_ohlcv_candle['low'], tick_price)
+                    in_progress_ohlcv_candle['close'] = tick_price
+                    in_progress_ohlcv_candle['volume'] += 1
+                    # logging.debug(f"Updating in-progress candle for {interval_start_time_dt}: C={tick_price}, H={in_progress_ohlcv_candle['high']}, L={in_progress_ohlcv_candle['low']}")
+
+                # For indicators, use historical candles + the current in-progress one
+                temp_ohlcv_list = list(market_data['ohlcv_candles'])
+                if in_progress_ohlcv_candle:
+                    temp_ohlcv_list.append(in_progress_ohlcv_candle) # Add current forming candle
+                indicator_input_data_for_calc = temp_ohlcv_list
+
+            else: # current_chart_type == 'tick'
+                # Use recent tick prices for indicators
+                indicator_input_data_for_calc = market_data['prices'][-max_tick_points:] # Use the capped tick prices
+
+            # Calculate indicators based on the determined input data
+            if not indicator_input_data_for_calc:
                 logging.warning("No data (tick or ohlcv) available for indicator calculation on new tick. Skipping.")
             else:
-                # logging.debug(f"Calling calculate_indicators with data of type: {type(indicator_input_data[0] if indicator_input_data else None)}, length: {len(indicator_input_data)}")
-                updated_data = calculate_indicators(indicator_input_data)
-            
-            for key, value in updated_data.items():
-                if key in market_data: 
-                    if isinstance(value, list):
-                        market_data[key] = value 
-                    elif isinstance(value, str):
-                        market_data[key] = value 
-            
-            if 'volumes' in market_data:
-                 market_data['volumes'].append(np.random.randint(1000,5000))
-                 if len(market_data['volumes']) > 100: market_data['volumes'] = market_data['volumes'][-100:]
+                updated_data = calculate_indicators(indicator_input_data_for_calc)
+                for key, value in updated_data.items():
+                    if key in market_data:
+                        if isinstance(value, list): market_data[key] = value
+                        elif isinstance(value, str): market_data[key] = value
 
     elif msg_type == 'candles':
         raw_candles_list = data.get('candles', [])
@@ -581,26 +619,27 @@ def on_close_for_deriv(ws, close_status_code, close_msg):
     logging.warning(f"WebSocket connection closed. Status: {close_status_code}, Message: {close_msg}. Current SYMBOL: {SYMBOL}")
 
 def start_deriv_ws(token=None):
-    global ws_thread, ws_app, API_TOKEN, market_data, current_tick_subscription_id
+    global ws_thread, ws_app, API_TOKEN, market_data, current_tick_subscription_id, in_progress_ohlcv_candle
     if token: API_TOKEN = token
     
     if ws_app and ws_app.sock and ws_app.sock.connected:
         logging.info("Existing WebSocket connection found. Closing it before restarting.")
         try:
-            ws_app.keep_running = False
+            ws_app.keep_running = False # Signal the run_forever loop to stop
             ws_app.close()
-            if ws_thread and ws_thread.is_alive(): ws_thread.join(timeout=5)
+            if ws_thread and ws_thread.is_alive(): ws_thread.join(timeout=5) # Wait for thread to finish
         except Exception as e: logging.error(f"Error closing existing WebSocket: {e}")
     
     logging.info(f"Starting WebSocket connection for SYMBOL: {SYMBOL}.")
-    with market_data_lock:
+    with market_data_lock: # Ensure thread-safe access to market_data and in_progress_ohlcv_candle
         market_data.clear()
         market_data.update(copy.deepcopy(DEFAULT_MARKET_DATA))
-        logging.info(f"Market data cleared and re-initialized for {SYMBOL}.")
+        in_progress_ohlcv_candle = None # Reset in-progress candle
+        logging.info(f"Market data and in-progress candle cleared and re-initialized for {SYMBOL}.")
     
-    current_tick_subscription_id = None
+    current_tick_subscription_id = None # Reset subscription ID
 
-    def run_ws():
+    def run_ws(): # This function runs in a separate thread
         global ws_app
         ws_app = websocket.WebSocketApp(
             DERIV_WS_URL,
@@ -619,10 +658,24 @@ def start_deriv_ws(token=None):
 
 @app.route('/api/market_data')
 def get_market_data_endpoint():
-    global current_chart_type, current_granularity_seconds, TIMEFRAME_TO_SECONDS 
+    global current_chart_type, current_granularity_seconds, TIMEFRAME_TO_SECONDS, market_data, in_progress_ohlcv_candle, market_data_lock
 
     with market_data_lock: 
-        data_to_send = copy.deepcopy(market_data) 
+        # Create a deepcopy to avoid issues if market_data is modified while this runs
+        data_to_send = copy.deepcopy(market_data)
+
+        # If OHLCV chart is active and there's an in-progress candle, add it to the list for the frontend
+        if current_chart_type == 'ohlcv' and in_progress_ohlcv_candle:
+            # Ensure ohlcv_candles is a list before trying to append
+            if not isinstance(data_to_send.get('ohlcv_candles'), list):
+                data_to_send['ohlcv_candles'] = [] # Initialize if not already a list
+
+            # Append a copy of the in-progress candle so modifications don't affect this snapshot
+            data_to_send['ohlcv_candles'].append(copy.deepcopy(in_progress_ohlcv_candle))
+            # Optional: Re-sort if appending could mess order, though it should be the latest
+            # data_to_send['ohlcv_candles'].sort(key=lambda c: c['time'])
+            # Optional: Re-cap if adding the in-progress candle could exceed a display limit (different from storage MAX_OHLCV_CANDLES)
+            # For now, assume frontend can handle one extra candle for display.
 
     data_to_send['current_chart_type'] = current_chart_type
     data_to_send['current_granularity_seconds'] = current_granularity_seconds
@@ -639,48 +692,68 @@ def get_market_data_endpoint():
 
 @app.route('/api/set_chart_settings', methods=['POST'])
 def set_chart_settings_endpoint():
-    global current_chart_type, current_granularity_seconds, ws_app, SYMBOL, market_data_lock, market_data
+    global current_chart_type, current_granularity_seconds, ws_app, SYMBOL, market_data_lock, market_data, in_progress_ohlcv_candle
 
     data = request.get_json()
     if not data:
         return jsonify({'status': 'error', 'message': 'No data provided'}), 400
 
     new_chart_type = data.get('chart_type', current_chart_type)
-    new_timeframe_str = data.get('timeframe_str', None) 
-    made_change = False
+    new_timeframe_str = data.get('timeframe_str', None)
+
+    chart_type_changed = False
+    granularity_changed = False
 
     if new_chart_type != current_chart_type:
         if new_chart_type in ['tick', 'ohlcv']:
-            current_chart_type = new_chart_type
-            made_change = True
+            with market_data_lock: # Lock for modifying current_chart_type and in_progress_ohlcv_candle
+                current_chart_type = new_chart_type
+                if current_chart_type != 'ohlcv': # Reset if switching away from OHLCV
+                    in_progress_ohlcv_candle = None
+                    logging.info("Switched chart type away from OHLCV, cleared in-progress candle.")
+            chart_type_changed = True
             logging.info(f"Chart type changed to: {current_chart_type}")
         else:
             logging.warning(f"Invalid chart_type received: {new_chart_type}")
     
     if new_timeframe_str:
-        granularity = TIMEFRAME_TO_SECONDS.get(new_timeframe_str.upper())
-        if granularity:
-            if granularity != current_granularity_seconds:
-                current_granularity_seconds = granularity
-                made_change = True
+        new_granularity_seconds = TIMEFRAME_TO_SECONDS.get(new_timeframe_str.upper())
+        if new_granularity_seconds:
+            if new_granularity_seconds != current_granularity_seconds:
+                with market_data_lock: # Lock for modifying granularity and in_progress_ohlcv_candle
+                    current_granularity_seconds = new_granularity_seconds
+                    in_progress_ohlcv_candle = None # Granularity change invalidates current forming candle
+                    logging.info("Granularity changed, cleared in-progress candle.")
+                granularity_changed = True
                 logging.info(f"Chart granularity changed to: {current_granularity_seconds}s (from {new_timeframe_str})")
         else:
             logging.warning(f"Invalid timeframe_str received: {new_timeframe_str}")
 
-    if made_change: 
-        logging.info(f"Chart settings changed. ChartType: {current_chart_type}, Granularity: {current_granularity_seconds}s. Requesting relevant data if needed.")
+    if chart_type_changed or granularity_changed:
+        logging.info(f"Chart settings updated. ChartType: {current_chart_type}, Granularity: {current_granularity_seconds}s.")
+
+        # Clear relevant historical data and request fresh historical data if needed
+        with market_data_lock:
+            market_data['ohlcv_candles'].clear() # Clear old candles on any significant change
+            if current_chart_type == 'tick': # For tick chart, also clear price/timestamp arrays
+                 market_data['prices'].clear()
+                 market_data['timestamps'].clear()
+            # Reset all indicator arrays as they depend on the price data type and granularity
+            for key in DEFAULT_MARKET_DATA.keys():
+                if key not in ['ohlcv_candles', 'prices', 'timestamps', 'volumes', # Keep basic structures
+                               'high_24h', 'low_24h', 'volume_24h'] and isinstance(market_data.get(key), list):
+                    market_data[key].clear()
+            logging.info("Cleared historical OHLCV, potentially tick data, and all indicator arrays due to settings change.")
+
         if ws_app and ws_app.sock and ws_app.sock.connected:
             if current_chart_type == 'ohlcv':
-                logging.info(f"Attempting to fetch/refresh OHLCV data due to settings change: Symbol={SYMBOL}, Granularity={current_granularity_seconds}s, ChartType={current_chart_type}")
-                with market_data_lock: 
-                    if 'ohlcv_candles' in market_data: market_data['ohlcv_candles'].clear()
-                    if 'prices' in market_data: market_data['prices'].clear() 
-                    if 'timestamps' in market_data: market_data['timestamps'].clear()
+                logging.info(f"Requesting new historical OHLCV data for {SYMBOL}, Granularity={current_granularity_seconds}s.")
                 request_ohlcv_data(ws_app, SYMBOL, current_granularity_seconds)
-            # If chart type changed to 'tick', existing live ticks will populate 'prices' and 'timestamps'.
-            # Indicators will be recalculated on the next tick based on the new 'current_chart_type'.
+            # If chart type is 'tick', live ticks will start populating. Historical ticks are generally not re-fetched unless it's a symbol change.
+            # Daily summary data might also be re-requested if it's considered part of the "main" data display.
+            request_daily_data(ws_app, SYMBOL) # Refresh daily summary too
         else:
-            logging.warning("WebSocket not connected. Cannot immediately fetch new data on settings change.")
+            logging.warning("WebSocket not connected. Cannot fetch new data on settings change.")
     
     return jsonify({
         'status': 'success',
@@ -864,9 +937,9 @@ def send_ws_request_and_wait(payload_type: str, payload: dict, timeout_seconds=1
 def get_account_balance():
     if not API_TOKEN:
         return jsonify({'status': 'error', 'message': 'API token not configured or user not connected.'}), 401
-    
+
     balance_payload = {"balance": 1} # "subscribe": 1 can be added if continuous updates are needed
-    
+
     data, error = send_ws_request_and_wait('account_balance', balance_payload)
 
     if error:
