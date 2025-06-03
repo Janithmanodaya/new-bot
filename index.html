@@ -505,6 +505,18 @@
                                     <option value="ohlcv">Candles</option>
                                 </select>
                             </div>
+                            <div class="ema-selector" style="margin-left: 20px;">
+                                <label for="emaSelect" style="font-size: 14px; color: var(--gray); margin-right: 5px;">EMA:</label>
+                                <select id="emaSelect" style="background: var(--dark); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; color: var(--light); font-size: 14px;">
+                                    <option value="none">None</option>
+                                    <option value="ema_10">EMA 10</option>
+                                    <option value="ema_20">EMA 20</option>
+                                    <option value="ema_30">EMA 30</option>
+                                    <option value="ema_50">EMA 50</option>
+                                    <option value="ema_100">EMA 100</option>
+                                    <option value="ema_200">EMA 200</option>
+                                </select>
+                            </div>
                         </div>
                     </div>
                     <canvas id="priceChart"></canvas>
@@ -637,6 +649,7 @@
     <script>
         let currentSelectedSymbol = ''; // Global variable for the currently selected symbol
         let jsFrontendChartType = 'tick'; // Default chart type
+        let cachedApiData = null; // To store the latest API data for redraws
 
         const analysisTableConfig = [
             { key: 'prices', label: 'Price', precision: 2 }, // 'key' here refers to the data field for the value
@@ -659,7 +672,9 @@
             { key: 'ema_100', label: 'EMA (100)', precision: 2 },
             { key: 'sma_200', label: 'SMA (200)', precision: 2 },
             { key: 'ema_200', label: 'EMA (200)', precision: 2 },
-            { key: 'volumes', label: 'Volume', precision: 0 } // Assuming 'volumes' is the key
+            { key: 'volumes', label: 'Volume', precision: 0 }, // Assuming 'volumes' is the key
+            { key: 'atr_14', label: 'ATR (14)', precision: 4 }, // Display ATR value itself
+            { key: 'atr_volatility_state', label: 'ATR Volatility', isState: true } // Display ATR Volatility State
         ];
         
         function updateAnalysisTable(apiData) {
@@ -681,35 +696,46 @@
                 const cellSignal = row.insertCell(); // New cell for signal
 
                 cellLabel.textContent = item.label;
-                cellValue.textContent = displayValue;
+                cellValue.style.textAlign = 'right'; // Common style for value cell
                 cellSignal.textContent = '-'; // Default signal display
+                cellSignal.style.color = 'var(--gray)'; // Default signal color
 
-                // Styling for label and value cells
-                cellLabel.style.padding = '8px';
-                cellLabel.style.borderBottom = '1px solid var(--border)';
-                cellValue.style.padding = '8px';
-                cellValue.style.borderBottom = '1px solid var(--border)';
-                cellValue.style.textAlign = 'right';
-                
-                // Styling for signal cell
-                cellSignal.style.padding = '8px';
-                cellSignal.style.borderBottom = '1px solid var(--border)';
-                cellSignal.style.textAlign = 'left'; // Or 'center' as preferred
+                // Common styling for all cells
+                [cellLabel, cellValue, cellSignal].forEach(cell => {
+                    cell.style.padding = '8px';
+                    cell.style.borderBottom = '1px solid var(--border)';
+                });
+                 cellSignal.style.textAlign = 'left';
 
-                if (item.signalKey && apiData[item.signalKey] !== undefined) { // Check undefined to allow "Neutral" or other strings
-                    const signalValue = apiData[item.signalKey];
-                    cellSignal.textContent = signalValue; // Display the signal string ('Buy', 'Sell', 'Neutral', 'N/A')
-                    
-                    // Apply color styling based on signalValue
-                    if (signalValue === 'Buy') {
-                        cellSignal.style.color = 'var(--success)'; // Green
-                    } else if (signalValue === 'Sell') {
-                        cellSignal.style.color = 'var(--danger)';  // Red
-                    } else { // Neutral, N/A, or any other string
-                        cellSignal.style.color = 'var(--gray)'; 
-                    }
+
+                if (item.isState) { // Handle state display like ATR Volatility
+                    const stateValue = apiData[item.key] !== undefined ? apiData[item.key] : 'N/A';
+                    cellValue.textContent = stateValue;
+                    // Optionally, apply specific styling to the state value itself if needed
+                    if (stateValue === 'High') cellValue.style.color = 'var(--warning)';
+                    else if (stateValue === 'Low') cellValue.style.color = 'var(--primary)'; // Or another distinct color
+                    else cellValue.style.color = 'var(--light)'; // Normal or N/A
+                    cellSignal.textContent = '-'; // No signal for state-like items
                 } else {
-                     cellSignal.style.color = 'var(--gray)'; // Default for '-' or if signalKey is not present
+                    // Existing logic for indicators with numerical values and optional signals
+                    const dataArray = apiData[item.key];
+                    const latestValue = dataArray && dataArray.length > 0 ? dataArray[dataArray.length - 1] : 'N/A';
+                    const displayValue = typeof latestValue === 'number' ? latestValue.toFixed(item.precision) : latestValue;
+                    cellValue.textContent = displayValue;
+                    cellValue.style.color = 'var(--light)'; // Reset color for numerical values
+
+                    if (item.signalKey && apiData[item.signalKey] !== undefined) {
+                        const signalValue = apiData[item.signalKey];
+                        cellSignal.textContent = signalValue;
+
+                        if (signalValue === 'Buy') {
+                            cellSignal.style.color = 'var(--success)';
+                        } else if (signalValue === 'Sell') {
+                            cellSignal.style.color = 'var(--danger)';
+                        } else {
+                            cellSignal.style.color = 'var(--gray)';
+                        }
+                    }
                 }
             });
         }
@@ -736,151 +762,165 @@
         }
 
         function updateCharts(apiData, currentSymbol) {
+            if (!apiData) {
+                console.warn("updateCharts called with no apiData. Skipping chart update.");
+                return;
+            }
+            cachedApiData = apiData; // Cache the data for EMA selector changes
+
             console.log("--- updateCharts Called ---");
-            // Use try-catch for stringify in case apiData is not perfectly structured or contains circular refs, though unlikely for this data
-            try {
-                console.log("Received apiData (structure snapshot):", JSON.parse(JSON.stringify(apiData))); 
-            } catch (e) {
-                console.log("Received apiData (could not stringify, logging directly):", apiData);
-            }
-            console.log("Received currentSymbol:", currentSymbol);
-            console.log("Data check: apiData.current_chart_type:", apiData.current_chart_type);
-            console.log("Data check: apiData.current_granularity_seconds:", apiData.current_granularity_seconds);
-            console.log("Data check: apiData.ohlcv_candles type:", typeof apiData.ohlcv_candles, "is Array:", Array.isArray(apiData.ohlcv_candles));
-            if (apiData.ohlcv_candles) {
-                console.log("Data check: apiData.ohlcv_candles length:", apiData.ohlcv_candles.length);
-                if (apiData.ohlcv_candles.length > 0) {
-                    try { // Added try-catch for individual candle stringify
-                        console.log("Data check: First OHLCV candle received by frontend:", JSON.parse(JSON.stringify(apiData.ohlcv_candles[0])));
-                        console.log("Data check: Last OHLCV candle received by frontend:", JSON.parse(JSON.stringify(apiData.ohlcv_candles[apiData.ohlcv_candles.length - 1])));
-                    } catch(e) {
-                        console.error("Error stringifying individual OHLCV candles:", e);
-                        console.log("First OHLCV candle (direct):", apiData.ohlcv_candles[0]);
-                        console.log("Last OHLCV candle (direct):", apiData.ohlcv_candles[apiData.ohlcv_candles.length - 1]);
-                    }
-                }
-            } else {
-                console.log("Data check: apiData.ohlcv_candles is undefined or null.");
-            }
-            console.log("Data check: apiData.prices type:", typeof apiData.prices, "is Array:", Array.isArray(apiData.prices));
-             if (apiData.prices) {
-                console.log("Data check: apiData.prices length:", apiData.prices.length);
-            } else {
-                console.log("Data check: apiData.prices is undefined or null.");
-            }
+            // console.log("Received apiData (structure snapshot):", JSON.parse(JSON.stringify(apiData))); // Can be verbose
 
             const chartTypeToRender = jsFrontendChartType;
-            // Still log what backend thinks for comparison:
-            console.log(`updateCharts: Backend reports current_chart_type: ${apiData.current_chart_type}, Frontend will use jsFrontendChartType: ${chartTypeToRender}`);
-            
-            // const chartType = apiData.current_chart_type; // Old way
-            const granularitySeconds = apiData.current_granularity_seconds; // Still use backend's granularity for time unit calc
-
+            const granularitySeconds = apiData.current_granularity_seconds;
             const priceCtx = document.getElementById('priceChart').getContext('2d');
 
             if (window.priceChartInstance) {
                 window.priceChartInstance.destroy();
             }
 
+            let datasets = [];
+            let chartLabels = chartTypeToRender === 'ohlcv' ?
+                              (apiData.ohlcv_candles || []).map(c => c.time) :
+                              (apiData.timestamps || []);
+
+            // Main Price Data (Line or Candlestick)
             if (chartTypeToRender === 'ohlcv' && apiData.ohlcv_candles && apiData.ohlcv_candles.length > 0) {
                 const ohlcData = apiData.ohlcv_candles.map(candle => ({
-                    x: candle.time, 
-                    o: candle.open,
-                    h: candle.high,
-                    l: candle.low,
-                    c: candle.close
+                    x: candle.time, o: candle.open, h: candle.high, l: candle.low, c: candle.close
                 }));
-                console.log("Prepared ohlcData for candlestick chart:", ohlcData);
-                if (ohlcData.length > 0) { console.log("First transformed ohlcData point:", ohlcData[0]); console.log("Last transformed ohlcData point:", ohlcData[ohlcData.length-1]); }
-                
-                let timeUnit = 'minute'; 
-                if (granularitySeconds >= 86400) timeUnit = 'day';
-                else if (granularitySeconds >= 3600) timeUnit = 'hour';
-
-                console.log("Attempting to create new Candlestick chart with time unit:", timeUnit);
-                window.priceChartInstance = new Chart(priceCtx, {
-                    type: 'candlestick', 
-                    data: {
-                        datasets: [{
-                            label: `${currentSymbol} OHLCV`,
-                            data: ohlcData,
-                            color: { // Example styling for candlestick colors
-                                up: 'rgba(34, 197, 94, 1)', // --success
-                                down: 'rgba(239, 68, 68, 1)', // --danger
-                                unchanged: 'rgba(148, 163, 184, 1)' // --gray
-                            }
-                        }]
-                    },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        scales: {
-                            x: {
-                                type: 'time',
-                                time: { unit: timeUnit }, 
-                                adapters: { date: { locale: moment.locale() } }, 
-                                grid: { display: false }
-                            },
-                            y: {
-                                grid: { color: 'rgba(255, 255, 255, 0.05)' },
-                            }
-                        },
-                        plugins: {
-                            legend: { display: true, labels: { color: 'var(--light)'} },
-                            tooltip: { mode: 'index', intersect: false }
-                        }
-                    }
+                datasets.push({
+                    type: 'candlestick',
+                    label: `${currentSymbol} OHLCV`,
+                    data: ohlcData,
+                    order: 0, // Ensure price is drawn first
+                    color: { up: 'rgba(34, 197, 94, 1)', down: 'rgba(239, 68, 68, 1)', unchanged: 'rgba(148, 163, 184, 1)' }
                 });
             } else if (chartTypeToRender === 'tick' && apiData.timestamps && apiData.prices && apiData.timestamps.length > 0) {
-                console.log("Attempting to create new Line (Tick) chart.");
-                window.priceChartInstance = new Chart(priceCtx, {
+                datasets.push({
                     type: 'line',
-                    data: {
-                        labels: apiData.timestamps, 
-                        datasets: [{
-                            label: `${currentSymbol} Price (Tick)`,
-                            data: apiData.prices,
-                            borderColor: '#3b82f6',
-                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
-                            borderWidth: 2,
-                            fill: true,
-                            tension: 0.3,
-                            pointRadius: 0
-                        }]
-                    },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        scales: {
-                            x: {
-                                type: 'time',
-                                time: { unit: 'minute' }, 
-                                adapters: { date: { locale: moment.locale() } },
-                                grid: { display: false }
-                            },
-                            y: {
-                                grid: { color: 'rgba(255, 255, 255, 0.05)' }
-                            }
-                        },
-                        plugins: {
-                            legend: { display: true, labels: { color: 'var(--light)'} },
-                            tooltip: { mode: 'index', intersect: false }
-                        }
-                    }
+                    label: `${currentSymbol} Price (Tick)`,
+                    data: apiData.prices.map((price, index) => ({x: apiData.timestamps[index], y: price})),
+                    borderColor: '#3b82f6',
+                    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                    borderWidth: 2,
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 0,
+                    order: 0
                 });
+                chartLabels = apiData.timestamps; // Ensure labels are set for tick chart
             } else {
-                console.error("No data to display or chartTypeToRender not recognized. chartTypeToRender:", chartTypeToRender, 
-                    "ohlcv_candles available:", !!apiData.ohlcv_candles, 
-                    "ohlcv_candles length:", apiData.ohlcv_candles ? apiData.ohlcv_candles.length : 'N/A',
-                    "timestamps available:", !!apiData.timestamps,
-                    "prices available:", !!apiData.prices);
-                // Optionally clear canvas or show "No data" message
-                if (window.priceChartInstance) window.priceChartInstance.destroy(); // Ensure it's blank
-                 priceCtx.clearRect(0, 0, priceCtx.canvas.width, priceCtx.canvas.height); // Clear canvas
-                 priceCtx.fillStyle = 'var(--gray)';
-                 priceCtx.textAlign = 'center';
-                 priceCtx.fillText("No data to display for selected chart type/timeframe.", priceCtx.canvas.width / 2, priceCtx.canvas.height / 2);
+                console.warn("No primary price data (OHLCV or Tick) to display.");
+                // Display "No data" message if no datasets can be formed
+                priceCtx.clearRect(0, 0, priceCtx.canvas.width, priceCtx.canvas.height);
+                priceCtx.fillStyle = 'var(--gray)';
+                priceCtx.textAlign = 'center';
+                priceCtx.fillText("No data to display for selected chart type/timeframe.", priceCtx.canvas.width / 2, priceCtx.canvas.height / 2);
+                return; // Exit if no main data
             }
+
+            // Bollinger Bands
+            if (apiData.bollinger_upper && apiData.bollinger_middle && apiData.bollinger_lower && chartLabels.length > 0) {
+                const bbTimestamps = chartTypeToRender === 'ohlcv' ?
+                                     (apiData.ohlcv_candles || []).map(c => c.time) :
+                                     (apiData.timestamps || []);
+
+                if (bbTimestamps.length === apiData.bollinger_upper.length) { // Ensure data aligns
+                    datasets.push({
+                        type: 'line',
+                        label: 'Bollinger Upper',
+                        data: apiData.bollinger_upper.map((val, index) => ({x: bbTimestamps[index], y: val})),
+                        borderColor: 'rgba(255, 165, 0, 0.5)', // Orange, semi-transparent
+                        borderWidth: 1.5,
+                        pointRadius: 0,
+                        fill: false, // No fill for individual band line
+                        order: 1
+                    });
+                    datasets.push({
+                        type: 'line',
+                        label: 'Bollinger Middle',
+                        data: apiData.bollinger_middle.map((val, index) => ({x: bbTimestamps[index], y: val})),
+                        borderColor: 'rgba(255, 165, 0, 0.8)', // Orange, more opaque
+                        borderWidth: 1.5,
+                        borderDash: [5, 5], // Dashed line for middle
+                        pointRadius: 0,
+                        fill: false,
+                        order: 2
+                    });
+                    datasets.push({
+                        type: 'line',
+                        label: 'Bollinger Lower',
+                        data: apiData.bollinger_lower.map((val, index) => ({x: bbTimestamps[index], y: val})),
+                        borderColor: 'rgba(255, 165, 0, 0.5)', // Orange, semi-transparent
+                        borderWidth: 1.5,
+                        pointRadius: 0,
+                        fill: '-1', // Fill to the previous dataset (Bollinger Middle or Upper if Middle is not visible)
+                                     // Or use specific index: fill: datasets.findIndex(ds => ds.label === 'Bollinger Upper')
+                        backgroundColor: 'rgba(255, 165, 0, 0.05)', // Light orange fill
+                        order: 3
+                    });
+                } else {
+                     console.warn("Bollinger Bands data length mismatch with timestamps. Skipping BB display.");
+                }
+            }
+
+            // Selectable EMA
+            const emaSelector = document.getElementById('emaSelect');
+            const selectedEMAKey = emaSelector ? emaSelector.value : 'none';
+            if (selectedEMAKey !== 'none' && apiData[selectedEMAKey] && apiData[selectedEMAKey].length > 0 && chartLabels.length > 0) {
+                const emaTimestamps = chartTypeToRender === 'ohlcv' ?
+                                     (apiData.ohlcv_candles || []).map(c => c.time) :
+                                     (apiData.timestamps || []);
+                if (emaTimestamps.length === apiData[selectedEMAKey].length) {
+                    datasets.push({
+                        type: 'line',
+                        label: selectedEMAKey.toUpperCase().replace('_', ' '),
+                        data: apiData[selectedEMAKey].map((val, index) => ({x: emaTimestamps[index], y: val})),
+                        borderColor: 'rgba(139, 0, 139, 0.8)', // Dark Magenta
+                        borderWidth: 2,
+                        pointRadius: 0,
+                        fill: false,
+                        order: 4 // Ensure EMA is drawn on top of BB fill
+                    });
+                } else {
+                    console.warn(`Selected EMA (${selectedEMAKey}) data length mismatch with timestamps. Skipping EMA display.`);
+                }
+            }
+
+            let timeUnit = 'minute';
+            if (granularitySeconds >= 86400) timeUnit = 'day';
+            else if (granularitySeconds >= 3600) timeUnit = 'hour';
+
+            window.priceChartInstance = new Chart(priceCtx, {
+                // Type is dynamically set per dataset, or can be 'line' if primary is line, 'candlestick' if primary is OHLCV.
+                // For mixed charts, it's often better to set type per dataset.
+                // Defaulting to 'line' here, but individual datasets will override.
+                type: chartTypeToRender === 'ohlcv' ? 'candlestick' : 'line',
+                data: {
+                    // labels: chartLabels, // Not needed if x values are provided in each dataset point object
+                    datasets: datasets
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: { unit: timeUnit },
+                            adapters: { date: { locale: moment.locale() } },
+                            grid: { display: false }
+                        },
+                        y: {
+                            grid: { color: 'rgba(255, 255, 255, 0.05)' },
+                        }
+                    },
+                    plugins: {
+                        legend: { display: true, labels: { color: 'var(--light)'} },
+                        tooltip: { mode: 'index', intersect: false }
+                    }
+                }
+            });
         }
 
         document.addEventListener('DOMContentLoaded', async function() {
@@ -1006,20 +1046,25 @@
 
             // Poll the Python backend for real market data every 2 seconds
             let polling = true;
-            let pollTimeoutId = null; 
+            let pollTimeoutId = null;
+
             async function pollMarketData() {
                 if (!polling) return;
                 try {
-                    const data = await fetchMarketData(); 
-                    if (data) { // Check if data is not null/undefined
-                        if (data.prices && data.prices.length > 0) {
-                            updateCharts(data, currentSelectedSymbol); // Update main price chart
-                            document.querySelector('.price-display').textContent = data.prices[data.prices.length - 1].toFixed(2);
-                        } else {
-                            // Clear main price chart if no price data but data object exists
-                            updateCharts({ timestamps: [], prices: [] }, currentSelectedSymbol); 
-                            document.querySelector('.price-display').textContent = '--';
+                    const data = await fetchMarketData();
+                    cachedApiData = data; // Cache the data
+
+                    if (data) {
+                        // Update price display (use OHLCV close if available, else tick prices)
+                        let latestPriceForDisplay = '--';
+                        if (jsFrontendChartType === 'ohlcv' && data.ohlcv_candles && data.ohlcv_candles.length > 0) {
+                            latestPriceForDisplay = data.ohlcv_candles[data.ohlcv_candles.length - 1].close.toFixed(2);
+                        } else if (data.prices && data.prices.length > 0) {
+                            latestPriceForDisplay = data.prices[data.prices.length - 1].toFixed(2);
                         }
+                        document.querySelector('.price-display').textContent = latestPriceForDisplay;
+
+                        updateCharts(data, currentSelectedSymbol); // Update main price chart
                         updateAnalysisTable(data); // Update the new analysis table
 
                         // Helper function to update prediction items
@@ -1160,6 +1205,18 @@
             // Initialize chart controls and add event listeners
             const chartTypeSelectEl = document.getElementById('chartTypeSelect');
             const timeframeButtons = document.querySelectorAll('.timeframe-selector .time-btn');
+            const emaSelectorEl = document.getElementById('emaSelect');
+
+            if (emaSelectorEl) {
+                emaSelectorEl.addEventListener('change', function() {
+                    if (cachedApiData) { // Only update if we have data
+                        console.log("EMA selection changed to:", this.value, "Redrawing chart with cached data.");
+                        updateCharts(cachedApiData, currentSelectedSymbol);
+                    } else {
+                        console.log("EMA selection changed, but no cached data to redraw chart yet.");
+                    }
+                });
+            }
 
             function setTimeframeButtonsState(disabled) {
                 timeframeButtons.forEach(btn => {
