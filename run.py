@@ -1104,7 +1104,7 @@ if __name__ == '__main__':
 
 
 # --- Strategy Management API Endpoints ---
-@app.route('/api/strategies', methods=['POST'])
+@app.route('/api/strategies', methods=['POST'], strict_slashes=False)
 def create_strategy():
     global custom_strategies
     strategy_data = request.get_json()
@@ -1142,13 +1142,13 @@ def create_strategy():
     logging.info(f"Created strategy with ID: {strategy_id}, Name: {new_strategy['strategy_name']}")
     return jsonify(new_strategy), 201
 
-@app.route('/api/strategies', methods=['GET'])
+@app.route('/api/strategies', methods=['GET'], strict_slashes=False)
 def get_all_strategies():
     with strategies_lock:
         # Return a list of strategy objects, not the dict itself
         return jsonify(list(custom_strategies.values()))
 
-@app.route('/api/strategies/<strategy_id>', methods=['GET'])
+@app.route('/api/strategies/<strategy_id>', methods=['GET'], strict_slashes=False)
 def get_strategy_by_id(strategy_id):
     with strategies_lock:
         strategy = custom_strategies.get(strategy_id)
@@ -1158,7 +1158,7 @@ def get_strategy_by_id(strategy_id):
         logging.warning(f"Strategy with ID {strategy_id} not found (GET).")
         return jsonify({"error": "Strategy not found"}), 404
 
-@app.route('/api/strategies/<strategy_id>', methods=['PUT'])
+@app.route('/api/strategies/<strategy_id>', methods=['PUT'], strict_slashes=False)
 def update_strategy(strategy_id):
     global custom_strategies
     strategy_updates = request.get_json()
@@ -1186,7 +1186,7 @@ def update_strategy(strategy_id):
     logging.info(f"Updated strategy with ID: {strategy_id}")
     return jsonify(existing_strategy)
 
-@app.route('/api/strategies/<strategy_id>', methods=['DELETE'])
+@app.route('/api/strategies/<strategy_id>', methods=['DELETE'], strict_slashes=False)
 def delete_strategy(strategy_id):
     global custom_strategies
     with strategies_lock:
