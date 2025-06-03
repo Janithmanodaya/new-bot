@@ -742,7 +742,7 @@
                     if (item.signalKey && apiData[item.signalKey] !== undefined) {
                         const signalValue = apiData[item.signalKey];
                         cellSignal.textContent = signalValue;
-
+                        
                         if (signalValue === 'Buy') {
                             cellSignal.style.color = 'var(--success)';
                         } else if (signalValue === 'Sell') {
@@ -795,8 +795,8 @@
             }
 
             let datasets = [];
-            let chartLabels = chartTypeToRender === 'ohlcv' ?
-                              (apiData.ohlcv_candles || []).map(c => c.time) :
+            let chartLabels = chartTypeToRender === 'ohlcv' ? 
+                              (apiData.ohlcv_candles || []).map(c => c.time) : 
                               (apiData.timestamps || []);
 
             // Main Price Data (Line or Candlestick)
@@ -837,8 +837,8 @@
 
             // Bollinger Bands
             if (apiData.bollinger_upper && apiData.bollinger_middle && apiData.bollinger_lower && chartLabels.length > 0) {
-                const bbTimestamps = chartTypeToRender === 'ohlcv' ?
-                                     (apiData.ohlcv_candles || []).map(c => c.time) :
+                const bbTimestamps = chartTypeToRender === 'ohlcv' ? 
+                                     (apiData.ohlcv_candles || []).map(c => c.time) : 
                                      (apiData.timestamps || []);
 
                 if (bbTimestamps.length === apiData.bollinger_upper.length) { // Ensure data aligns
@@ -850,7 +850,7 @@
                         borderWidth: 1.5,
                         pointRadius: 0,
                         fill: false, // No fill for individual band line
-                        order: 1
+                        order: 1 
                     });
                     datasets.push({
                         type: 'line',
@@ -884,8 +884,8 @@
             const emaSelector = document.getElementById('emaSelect');
             const selectedEMAKey = emaSelector ? emaSelector.value : 'none';
             if (selectedEMAKey !== 'none' && apiData[selectedEMAKey] && apiData[selectedEMAKey].length > 0 && chartLabels.length > 0) {
-                const emaTimestamps = chartTypeToRender === 'ohlcv' ?
-                                     (apiData.ohlcv_candles || []).map(c => c.time) :
+                const emaTimestamps = chartTypeToRender === 'ohlcv' ? 
+                                     (apiData.ohlcv_candles || []).map(c => c.time) : 
                                      (apiData.timestamps || []);
                 if (emaTimestamps.length === apiData[selectedEMAKey].length) {
                     datasets.push({
@@ -902,7 +902,7 @@
                     console.warn(`Selected EMA (${selectedEMAKey}) data length mismatch with timestamps. Skipping EMA display.`);
                 }
             }
-
+            
             let timeUnit = 'minute';
             if (granularitySeconds >= 86400) timeUnit = 'day';
             else if (granularitySeconds >= 3600) timeUnit = 'hour';
@@ -911,7 +911,7 @@
                 // Type is dynamically set per dataset, or can be 'line' if primary is line, 'candlestick' if primary is OHLCV.
                 // For mixed charts, it's often better to set type per dataset.
                 // Defaulting to 'line' here, but individual datasets will override.
-                type: chartTypeToRender === 'ohlcv' ? 'candlestick' : 'line',
+                type: chartTypeToRender === 'ohlcv' ? 'candlestick' : 'line', 
                 data: {
                     // labels: chartLabels, // Not needed if x values are provided in each dataset point object
                     datasets: datasets
@@ -1062,13 +1062,13 @@
             // Poll the Python backend for real market data every 2 seconds
             let polling = true;
             let pollTimeoutId = null;
-
+            
             async function pollMarketData() {
                 if (!polling) return;
                 try {
                     const data = await fetchMarketData();
                     cachedApiData = data; // Cache the data
-
+                    
                     if (data) {
                         // Update price display (use OHLCV close if available, else tick prices)
                         let latestPriceForDisplay = '--';
@@ -1078,7 +1078,7 @@
                             latestPriceForDisplay = data.prices[data.prices.length - 1].toFixed(2);
                         }
                         document.querySelector('.price-display').textContent = latestPriceForDisplay;
-
+                        
                         updateCharts(data, currentSelectedSymbol); // Update main price chart
                         updateAnalysisTable(data); // Update the new analysis table
 
@@ -1262,7 +1262,7 @@
 
                     const activeTimeframeButton = document.querySelector('.timeframe-selector .time-btn.active');
                     // The default active timeframe is 5M now, so this default should ideally match.
-                    const currentTimeframe = activeTimeframeButton ? activeTimeframeButton.dataset.timeframe : '5M';
+                    const currentTimeframe = activeTimeframeButton ? activeTimeframeButton.dataset.timeframe : '5M'; 
                     
                     if (newChartType === 'tick') {
                         setTimeframeButtonsState(true);
@@ -1278,7 +1278,7 @@
                     fetch('/api/set_chart_settings', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ chart_type: newChartType, timeframe_str: currentTimeframe })
+                        body: JSON.stringify({ chart_type: newChartType, timeframe_str: currentTimeframe }) 
                     })
                     .then(response => response.json())
                     .then(data => {
@@ -1364,7 +1364,7 @@
 
             // View Switching Elements
             const dashboardView = document.getElementById('dashboardView');
-            const strategiesView = document.getElementById('strategiesView');
+            const strategiesView = document.getElementById('strategiesView'); 
             const strategyBuilderView = document.getElementById('strategyBuilderView'); // Added
             const navStrategiesBtn = document.getElementById('navStrategiesBtn');
             const homeNavLogo = document.getElementById('homeNavLogo');
@@ -1390,7 +1390,7 @@
                 }
                 // Example for future:
                 // if (viewIdToShow === 'strategyBuilderView' && typeof initializeStrategyBuilder === 'function') {
-                //    initializeStrategyBuilder();
+                //    initializeStrategyBuilder(); 
                 // }
             }
 
@@ -1487,7 +1487,7 @@
                     // Optional: Add active class styling to navStrategiesBtn and remove from other main nav buttons
                     console.log("Switched to Strategies View");
                     // You might want to load strategies here if not loaded automatically
-                    // fetchAndDisplayStrategies();
+                    // fetchAndDisplayStrategies(); 
                 });
             }
 
@@ -1501,7 +1501,7 @@
             }
 
             // Ensure default view state on load (dashboard visible, strategies hidden)
-            if (dashboardView) dashboardView.style.display = 'block';
+            if (dashboardView) dashboardView.style.display = 'block'; 
             if (strategiesView) strategiesView.style.display = 'none';
             else if(navStrategiesBtn) console.warn("strategiesView element not found for initial hide during page load.");
 
@@ -1536,18 +1536,18 @@
 
                             // Basic strategy info
                             let content = `<h4 style="margin-bottom: 5px;">${strategy.strategy_name}</h4>`;
-                            // The backend currently doesn't store 'symbol' directly in the strategy object.
+                            // The backend currently doesn't store 'symbol' directly in the strategy object. 
                             // This will be undefined unless the strategy_data payload included it.
                             // For now, we'll display it if present, or omit.
                             if (strategy.symbol) { // Check if symbol exists
                                content += `<p style="font-size: 0.9em; color: var(--gray);">Symbol: ${strategy.symbol}</p>`;
                             }
                             content += `<p style="font-size: 0.9em; margin-bottom: 10px;">${strategy.description || 'No description.'}</p>`;
-
+                            
                             // Placeholder for conditions and actions - can be more detailed later
                             content += `<p style="font-size: 0.8em; color: var(--gray);">Conditions: ${JSON.stringify(strategy.conditions_group, null, 2)}</p>`;
                             content += `<p style="font-size: 0.8em; color: var(--gray); margin-top: 5px;">Actions: ${JSON.stringify(strategy.actions, null, 2)}</p>`;
-
+                            
                             content += `<div style="margin-top: 10px;">
                                             <button class="btn btn-sm btn-outline-secondary" style="margin-right: 5px; padding: 5px 10px; font-size: 0.8em;">Edit</button>
                                             <button class="btn btn-sm btn-outline-danger" style="padding: 5px 10px; font-size: 0.8em;">Delete</button>
