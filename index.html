@@ -492,11 +492,12 @@
                         <div class="chart-title">Market Price - USD/JPY</div>
                         <div style="display: flex; align-items: center;"> <!-- Wrapper for selectors -->
                             <div class="timeframe-selector">
-                                <button class="time-btn active" data-timeframe="1H">1H</button>
-                                <button class="time-btn" data-timeframe="4H">4H</button>
-                                <button class="time-btn" data-timeframe="1D">1D</button>
-                                <button class="time-btn" data-timeframe="1W">1W</button>
-                                <button class="time-btn" data-timeframe="1M">1M</button>
+                                <button class="time-btn" data-timeframe="1M">1min</button>
+                                <button class="time-btn active" data-timeframe="5M">5min</button>
+                                <button class="time-btn" data-timeframe="10M">10min</button>
+                                <button class="time-btn" data-timeframe="15M">15min</button>
+                                <button class="time-btn" data-timeframe="30M">30min</button>
+                                <button class="time-btn" data-timeframe="1H">1h</button>
                             </div>
                             <div class="chart-type-selector" style="margin-left: 20px;">
                                 <label for="chartTypeSelect" style="font-size: 14px; color: var(--gray); margin-right: 5px;">Type:</label>
@@ -1246,12 +1247,11 @@
                     console.log(`jsFrontendChartType explicitly set to: ${jsFrontendChartType}`); 
 
                     const activeTimeframeButton = document.querySelector('.timeframe-selector .time-btn.active');
-                    const currentTimeframe = activeTimeframeButton ? activeTimeframeButton.dataset.timeframe : '1H'; // Default if somehow none active
+                    // The default active timeframe is 5M now, so this default should ideally match.
+                    const currentTimeframe = activeTimeframeButton ? activeTimeframeButton.dataset.timeframe : '5M';
                     
                     if (newChartType === 'tick') {
                         setTimeframeButtonsState(true);
-                        // Optionally, if switching to tick, we might not want to send a timeframe_str or a default one.
-                        // For now, it sends the last active or default '1H'. Backend should handle this gracefully for 'tick' type.
                     } else { // 'ohlcv'
                         setTimeframeButtonsState(false);
                     }
@@ -1259,6 +1259,8 @@
                     console.log(`Chart type changed to: ${newChartType}, current timeframe: ${currentTimeframe}`);
                     setStatus(`Loading ${newChartType === 'ohlcv' ? 'Candlestick' : 'Line'} chart...`, 'var(--warning)');
                     
+                    // When chart type changes, we need to inform the backend,
+                    // potentially with the currently active timeframe if it's relevant for OHLCV.
                     fetch('/api/set_chart_settings', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
