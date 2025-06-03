@@ -703,6 +703,11 @@
                     <textarea id="strategyDescriptionInput" placeholder="Describe the strategy's logic and purpose" style="width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--dark); color: var(--light); min-height: 80px;"></textarea>
                 </div>
 
+                <div class="form-group" style="margin-bottom: 20px; display: flex; align-items: center;">
+                    <input type="checkbox" id="strategyIsActiveInput" style="margin-right: 10px; width: 18px; height: 18px;">
+                    <label for="strategyIsActiveInput" style="font-weight: 500; margin-bottom: 0;">Strategy is Active</label>
+                </div>
+
                 <fieldset style="border: 1px solid var(--border); border-radius: 8px; padding: 15px; margin-bottom: 20px;">
                     <legend style="padding: 0 10px; font-weight: 500; color: var(--gray);">Conditions</legend>
                     <div id="conditionsContainer">
@@ -1717,20 +1722,49 @@
                                 content += `<p style="font-size:0.8em; color:var(--gray); margin-bottom:15px;">No actions defined.</p>`;
                             }
                             
+                            let statusText = strategy.is_active ? 'Active' : 'Disabled';
+                            // Check if status_message exists and if it's different from the basic "Active"/"Disabled" or if it's "Active" but strategy is_active (to avoid "Active (Active)")
+                            if (strategy.status_message && (strategy.status_message !== statusText || (strategy.is_active && strategy.status_message === "Active" && statusText === "Active"))) {
+                                if (strategy.is_active && strategy.status_message === "Active") {
+                                     // If is_active is true and status_message is "Active", just show "Active"
+                                     // This case is implicitly handled by initial statusText if no other status_message is present
+                                } else if (!strategy.is_active && strategy.status_message === "Disabled by user") {
+                                    // If !is_active and status_message is "Disabled by user", just show "Disabled"
+                                     statusText = 'Disabled'; // Or 'Disabled (by user)' if preferred
+                                }
+                                else {
+                                     statusText = `${strategy.is_active ? 'Active' : 'Disabled'} (${strategy.status_message})`;
+                                }
+                            }
+
+
+                            content += `<p style="font-size: 0.8em; color: var(--gray); margin-bottom: 10px;">Status: <strong style="color: ${strategy.is_active ? 'var(--success)' : 'var(--warning)'};">${statusText}</strong></p>`;
+
+                            const toggleButtonHtml = strategy.is_active
+                                ? `<button class="btn btn-outline btn-sm toggle-strategy-active-btn" data-id="${strategy.strategy_id}" data-action="disable" style="padding: 6px 12px; font-size: 0.85em; border-color: var(--warning); color: var(--warning);"><i class="fas fa-toggle-off"></i> Disable</button>`
+                                : `<button class="btn btn-outline btn-sm toggle-strategy-active-btn" data-id="${strategy.strategy_id}" data-action="enable" style="padding: 6px 12px; font-size: 0.85em; border-color: var(--success); color: var(--success);"><i class="fas fa-toggle-on"></i> Enable</button>`;
+
                             content += `<div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: auto; padding-top:10px; border-top: 1px solid var(--border);">
+                                            ${toggleButtonHtml}
                                             <button class="btn btn-outline btn-sm edit-strategy-btn" data-id="${strategy.strategy_id}" style="padding: 6px 12px; font-size: 0.85em;"><i class="fas fa-edit"></i> Edit</button>
                                             <button class="btn btn-outline btn-sm delete-strategy-btn" data-id="${strategy.strategy_id}" style="padding: 6px 12px; font-size: 0.85em; border-color: var(--danger); color: var(--danger);"><i class="fas fa-trash"></i> Delete</button>
                                         </div>`;
                             strategyEl.innerHTML = content;
                             container.appendChild(strategyEl);
 
-                            // Add event listeners for new buttons
+                            // Add event listeners for new/modified buttons
                             strategyEl.querySelector('.edit-strategy-btn').addEventListener('click', function() {
-                                window.handleEditStrategy(this.dataset.id);
+                                handleEditStrategy(this.dataset.id); // Direct call, assuming it's in scope or on window
                             });
                             strategyEl.querySelector('.delete-strategy-btn').addEventListener('click', function() {
-                                window.handleDeleteStrategy(this.dataset.id);
+                                handleDeleteStrategy(this.dataset.id); // Direct call
                             });
+                            const toggleBtn = strategyEl.querySelector('.toggle-strategy-active-btn');
+                            if (toggleBtn) {
+                                toggleBtn.addEventListener('click', function() {
+                                    handleToggleStrategyActive(this.dataset.id, this.dataset.action); // Direct call
+                                });
+                            }
                         });
                     }
                 } catch (error) {
@@ -1799,6 +1833,7 @@
                     document.querySelector('#conditionsContainer .condition-value').value = '';
                     document.querySelector('#actionsContainer .action-type').selectedIndex = 0;
                     document.querySelector('#actionsContainer .action-details').value = '';
+                    document.getElementById('strategyIsActiveInput').checked = true; // Default to active
                     showView('strategyBuilderView');
                 });
             }
@@ -1825,6 +1860,7 @@
                     document.getElementById('strategyIdInput').value = strategy.strategy_id;
                     document.getElementById('strategyNameInput').value = strategy.strategy_name || '';
                     document.getElementById('strategyDescriptionInput').value = strategy.description || '';
+                    document.getElementById('strategyIsActiveInput').checked = strategy.is_active === undefined ? true : strategy.is_active;
 
                     const conditionsGroup = strategy.conditions_group;
                     if (conditionsGroup && conditionsGroup.conditions && conditionsGroup.conditions.length > 0) {
@@ -1882,6 +1918,7 @@
                     const strategyId = document.getElementById('strategyIdInput').value;
                     const strategyName = document.getElementById('strategyNameInput').value.trim();
                     const strategyDescription = document.getElementById('strategyDescriptionInput').value.trim();
+                    const isActive = document.getElementById('strategyIsActiveInput').checked;
 
                     if (!strategyName) {
                         alert('Strategy Name is required.');
@@ -1919,7 +1956,8 @@
                         strategy_name: strategyName,
                         description: strategyDescription,
                         conditions_group: conditionsGroup,
-                        actions: actions
+                        actions: actions,
+                        is_active: isActive // Add this line
                     };
 
                     let url = '/api/strategies';
@@ -1957,6 +1995,38 @@
                 });
             }
             // --- Strategy CRUD and Navigation Logic END ---
+
+            // --- Function to Toggle Strategy Active State ---
+            window.handleToggleStrategyActive = async function(strategyId, action) {
+                console.log(`Attempting to ${action} strategy ID: ${strategyId}`);
+                const url = `/api/strategies/${strategyId}/${action}`; // action is 'enable' or 'disable'
+                let friendlyAction = action.charAt(0).toUpperCase() + action.slice(1); // Capitalize
+
+                try {
+                    const response = await fetch(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                    });
+
+                    if (!response.ok) {
+                        const errorData = await response.json().catch(() => ({ detail: `Unknown error during ${action}.` }));
+                        throw new Error(`Failed to ${action} strategy: ${response.status} - ${errorData.detail || errorData.error || 'Server error'}`);
+                    }
+
+                    const updatedStrategy = await response.json();
+                    console.log(`Strategy ${action}d successfully:`, updatedStrategy);
+                    alert(`Strategy successfully ${action}d.`);
+
+                    if (typeof loadAndDisplayCustomStrategies === 'function') {
+                        loadAndDisplayCustomStrategies();
+                    }
+
+                } catch (error) {
+                    console.error(`Error ${action}ing strategy:`, error);
+                    alert(`Could not ${action} strategy: ${error.message}`);
+                }
+            };
+
         });
         
         // The old, separate saveSettingsBtn listener is removed as its functionality 
