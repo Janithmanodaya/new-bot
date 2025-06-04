@@ -1094,15 +1094,6 @@ def execute_trade():
         return jsonify({'status': 'error', 'message': 'Invalid trade confirmation received.'}), 500
 
 
-start_deriv_ws()
-
-if __name__ == '__main__':
-    # Note: app.run(debug=True) is suitable for development.
-    # For production, use a proper WSGI server like Gunicorn or Waitress.
-    # load_strategies_from_file() # Already called above after app initialization
-    app.run(debug=True)
-
-
 # --- Strategy Management API Endpoints ---
 @app.route('/api/strategies', methods=['POST'], strict_slashes=False)
 def create_strategy():
@@ -1133,6 +1124,7 @@ def create_strategy():
             "description": strategy_data.get("description", ""),
             "conditions_group": strategy_data.get("conditions_group"),
             "actions": strategy_data.get("actions", []),
+            "is_active": strategy_data.get("is_active", True), # Added is_active field
             "created_at": datetime.now(timezone.utc).isoformat(),
             "updated_at": datetime.now(timezone.utc).isoformat()
         }
@@ -1178,6 +1170,7 @@ def update_strategy(strategy_id):
         existing_strategy["description"] = strategy_updates.get("description", existing_strategy["description"])
         existing_strategy["conditions_group"] = strategy_updates.get("conditions_group", existing_strategy["conditions_group"])
         existing_strategy["actions"] = strategy_updates.get("actions", existing_strategy["actions"])
+        existing_strategy["is_active"] = strategy_updates.get("is_active", existing_strategy.get("is_active", True)) # Added is_active field
         existing_strategy["updated_at"] = datetime.now(timezone.utc).isoformat()
         
         custom_strategies[strategy_id] = existing_strategy
@@ -1200,3 +1193,39 @@ def delete_strategy(strategy_id):
     save_strategies_to_file()
     logging.info(f"Deleted strategy with ID: {strategy_id}, Name: {deleted_strategy_name}")
     return jsonify({"message": "Strategy deleted successfully"}), 200
+
+@app.route('/api/strategies/<strategy_id>/enable', methods=['POST'], strict_slashes=False)
+def enable_strategy(strategy_id):
+    with strategies_lock:
+        global custom_strategies
+        if strategy_id not in custom_strategies:
+            logging.warning(f"Strategy with ID {strategy_id} not found (ENABLE).")
+            return jsonify({"error": "Strategy not found"}), 404
+        
+        custom_strategies[strategy_id]['is_active'] = True
+        custom_strategies[strategy_id]['updated_at'] = datetime.now(timezone.utc).isoformat()
+        save_strategies_to_file()
+        logging.info(f"Enabled strategy with ID: {strategy_id}, Name: {custom_strategies[strategy_id].get('strategy_name', 'N/A')}")
+        return jsonify(custom_strategies[strategy_id]), 200
+
+@app.route('/api/strategies/<strategy_id>/disable', methods=['POST'], strict_slashes=False)
+def disable_strategy(strategy_id):
+    with strategies_lock:
+        global custom_strategies
+        if strategy_id not in custom_strategies:
+            logging.warning(f"Strategy with ID {strategy_id} not found (DISABLE).")
+            return jsonify({"error": "Strategy not found"}), 404
+            
+        custom_strategies[strategy_id]['is_active'] = False
+        custom_strategies[strategy_id]['updated_at'] = datetime.now(timezone.utc).isoformat()
+        save_strategies_to_file()
+        logging.info(f"Disabled strategy with ID: {strategy_id}, Name: {custom_strategies[strategy_id].get('strategy_name', 'N/A')}")
+        return jsonify(custom_strategies[strategy_id]), 200
+
+start_deriv_ws()
+
+if __name__ == '__main__':
+    # Note: app.run(debug=True) is suitable for development.
+    # For production, use a proper WSGI server like Gunicorn or Waitress.
+    # load_strategies_from_file() # Already called above after app initialization
+    app.run(debug=True)
