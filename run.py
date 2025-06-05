@@ -1,5 +1,6 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from flask_sock import Sock # Added for WebSocket
 import logging
 import numpy as np
 import pandas as pd
@@ -19,16 +20,19 @@ from database import get_db_connection, create_tables # Added
 import asyncio # Added for websockets
 from asyncio import Semaphore # Added for rate limiting
 import websockets # Added for websockets
-# threading is already imported
+import threading # threading is already imported, ensure it's just `import threading`
 from threading import Event as ThreadingEvent # Explicitly import Event for clarity
 from concurrent.futures import ThreadPoolExecutor # Added for async indicators
 import inspect # Added for getting line numbers in logs
+import json # Ensure json is explicitly imported for ws data
+import copy # Ensure copy is explicitly imported for deepcopy for ws data
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s')
 
 app = Flask(__name__)
 CORS(app)
+sock = Sock(app) # Initialize Flask-Sock
 
 # Ensure database tables are created on application startup
 create_tables()
@@ -163,6 +167,13 @@ def save_strategy_to_db(strategy_data, is_update=False):
 # Load strategies at startup
 load_strategies_from_db()
 # --- End Strategy Management ---
+
+
+# --- WebSocket Frontend Communication Globals ---
+frontend_ws_clients = set()
+frontend_ws_clients_lock = threading.Lock()
+last_broadcast_state = {} # Stores the last full payload broadcasted, for delta computation
+# --- End WebSocket Frontend Communication Globals ---
 
 
 # Global variables for request tracking
@@ -534,7 +545,7 @@ async def on_open_for_deriv(ws):
 
 async def on_message_for_deriv(ws, message_str):
     global market_data, SYMBOL, current_tick_subscription_id, current_chart_type, current_granularity_seconds, in_progress_ohlcv_candle
-    global pending_api_requests, api_response_events, api_response_data, shared_data_lock, market_data_lock
+    global pending_api_requests, api_response_events, api_response_data, shared_data_lock, market_data_lock, asyncio_loop
     
     # logging.debug(f"Async Raw WS message received: {message_str[:500]}") # This line was already correct.
     data = json.loads(message_str)
@@ -563,6 +574,20 @@ async def on_message_for_deriv(ws, message_str):
         
         logging.error(f"Deriv API Error for req_id {req_id_of_message} (type: {failed_req_type_str}): {error_details}. Full message: {message_str}") # This line was already correct from a previous step.
         
+        # Placeholder rate limit detection
+        is_rate_limit_error = error_details.get('code') == 'DERIV_RATE_LIMIT_STREAM_HYPOTHETICAL' or \
+                              "rate limit" in error_details.get('message', '').lower()
+
+        if is_rate_limit_error:
+            logging.warning(f"Hypothetical Deriv rate limit detected: {error_details}")
+            rate_limit_payload = {
+                "type": "system_message", 
+                "sub_type": "rate_limit", 
+                "message": "Data stream from Deriv API may be rate-limited or experiencing issues. Updates might be delayed."
+            }
+            if asyncio_loop: # Ensure loop is available
+                asyncio_loop.call_soon_threadsafe(broadcast_system_message_to_frontend, rate_limit_payload)
+
         if event_to_set: # Must be outside lock to prevent deadlock if event waiter tries to acquire lock
             event_to_set.set()
         return
@@ -722,6 +747,10 @@ async def on_message_for_deriv(ws, message_str):
                             'updated_at': datetime.now(timezone.utc).isoformat()
                         }
                     logging.debug(f"Indicator cache updated for key: {cache_key}")
+                    # Broadcast update to frontend clients
+                    if asyncio_loop: # Ensure loop is available
+                        asyncio_loop.call_soon_threadsafe(broadcast_to_frontend_clients)
+
 
                 except Exception as e:
                     logging.error(f"Error during async indicator calculation or update from tick: {e}", exc_info=True)
@@ -795,6 +824,9 @@ async def on_message_for_deriv(ws, message_str):
                                     'updated_at': datetime.now(timezone.utc).isoformat()
                                 }
                             logging.debug(f"Indicator cache updated for OHLCV key: {cache_key}")
+                            # Broadcast update to frontend clients
+                            if asyncio_loop: # Ensure loop is available
+                                asyncio_loop.call_soon_threadsafe(broadcast_to_frontend_clients)
 
                         except Exception as e:
                              logging.error(f"Error during async indicator calculation or update from OHLCV candles: {e}", exc_info=True)
@@ -1043,9 +1075,237 @@ def get_market_data_endpoint():
             current_timeframe_str = tf_str
             break
     data_to_send['current_timeframe_string'] = current_timeframe_str
+    
+    # Add current symbol to the payload
+    data_to_send['current_symbol'] = SYMBOL # Assuming SYMBOL is the correct global variable
 
-    logging.debug(f"Sending market_data with chart_type: {current_chart_type}, granularity: {current_granularity_seconds}s, timeframe_str: {current_timeframe_str}")
+    logging.debug(f"Sending market_data with chart_type: {current_chart_type}, granularity: {current_granularity_seconds}s, timeframe_str: {current_timeframe_str}, symbol: {SYMBOL}")
     return jsonify(data_to_send)
+
+
+# --- WebSocket Endpoint for Frontend ---
+@sock.route('/ws/market_data')
+def market_data_ws(ws):
+    global frontend_ws_clients, frontend_ws_clients_lock, last_broadcast_state
+    logging.info(f"Frontend WebSocket client connected: {ws}")
+    
+    with frontend_ws_clients_lock:
+        frontend_ws_clients.add(ws)
+        # Prepare and send the current full state as the initial message
+        # This ensures the new client gets the absolute latest full state.
+        # last_broadcast_state is also updated here to reflect this full send.
+        full_payload_for_new_client = get_market_data_payload_for_frontend()
+        # Update last_broadcast_state *before* sending to avoid race if a broadcast happens immediately after
+        last_broadcast_state = copy.deepcopy(full_payload_for_new_client) 
+
+    try:
+        # Send the "full" data message
+        ws.send(json.dumps({"type": "full", "data": full_payload_for_new_client}))
+        logging.debug(f"Sent initial full data snapshot to new frontend client {ws}")
+    except Exception as e:
+        logging.error(f"Error sending initial full data to client {ws}: {e}")
+        # If send fails, remove client and clean up state if necessary
+        with frontend_ws_clients_lock:
+            frontend_ws_clients.discard(ws)
+        return # End this handler for this client
+
+    try:
+        while True:
+            raw_message = ws.receive() # Blocks here until a message or disconnect
+            if raw_message is None: # Client disconnected
+                logging.info(f"Frontend WebSocket client {ws} disconnected (received None).")
+                break
+            
+            try:
+                client_message = json.loads(raw_message)
+                if isinstance(client_message, dict) and client_message.get('type') == 'request_full_sync':
+                    logging.info(f"Client {ws} requested full sync.")
+                    current_full_payload = get_market_data_payload_for_frontend()
+                    # Create a deepcopy for sending to this client and for updating global state
+                    payload_copy_for_send = copy.deepcopy(current_full_payload)
+                    
+                    # Acquire lock to send to specific client and update last_broadcast_state consistently
+                    with frontend_ws_clients_lock:
+                        try:
+                            ws.send(json.dumps({"type": "full", "data": payload_copy_for_send}))
+                            # Update the global last_broadcast_state so subsequent deltas are correct for all clients.
+                            # It's crucial that last_broadcast_state is also a deepcopy if payload_copy_for_send could be further modified,
+                            # or if current_full_payload (from which it was copied) could be.
+                            # To be safe, make another deepcopy for last_broadcast_state.
+                            global last_broadcast_state
+                            last_broadcast_state = copy.deepcopy(payload_copy_for_send) 
+                            logging.info(f"Sent full data to client {ws} and updated last_broadcast_state.")
+                        except Exception as send_e:
+                            logging.error(f"Error sending full sync data to client {ws}: {send_e}. Client might be gone.")
+                            # If send fails, client might be problematic, consider removing it here or let main loop handle it.
+                            # For now, we'll let the main exception handler for the receive loop or next broadcast handle it.
+                else:
+                    logging.warning(f"Received unknown or malformed message from client {ws}: {raw_message[:200]}")
+            except json.JSONDecodeError:
+                logging.error(f"Failed to decode JSON from client {ws}: {raw_message[:200]}")
+            except Exception as e:
+                logging.error(f"Error processing message from client {ws}: {e}", exc_info=True)
+                # Depending on error, might want to break or continue. If message processing is critical, break.
+                # For now, log and continue, assuming it's a non-fatal client message issue.
+                # If the error is severe (e.g., related to ws object itself), it might be better to break.
+                # Let's break on processing errors to be safe, as client might be sending junk repeatedly.
+                break 
+
+    except ConnectionResetError:
+        logging.warning(f"Frontend WebSocket client {ws} connection reset.")
+    except websockets.exceptions.ConnectionClosed: # More general close exception for `websockets` library
+        logging.info(f"Frontend WebSocket client {ws} connection closed gracefully or unexpectedly.")
+    except Exception as e: # Catch-all for other errors in the receive loop
+        logging.error(f"Unhandled error in frontend WebSocket ({ws}) receive loop: {e}", exc_info=True)
+    finally:
+        logging.info(f"Frontend WebSocket client {ws} processing finished. Removing from active clients.")
+        with frontend_ws_clients_lock:
+            frontend_ws_clients.discard(ws)
+
+def get_market_data_payload_for_frontend():
+    """
+    Prepares the full market data payload to be sent to frontend clients.
+    This is similar to get_market_data_endpoint but returns a dict, not a Flask Response.
+    """
+    global current_chart_type, current_granularity_seconds, TIMEFRAME_TO_SECONDS, market_data, in_progress_ohlcv_candle, market_data_lock, SYMBOL
+    
+    with market_data_lock:
+        data_to_send = copy.deepcopy(market_data)
+        if current_chart_type == 'ohlcv' and in_progress_ohlcv_candle:
+            if not isinstance(data_to_send.get('ohlcv_candles'), list):
+                data_to_send['ohlcv_candles'] = []
+            data_to_send['ohlcv_candles'].append(copy.deepcopy(in_progress_ohlcv_candle))
+
+    data_to_send['current_chart_type'] = current_chart_type
+    data_to_send['current_granularity_seconds'] = current_granularity_seconds
+    current_timeframe_str = 'N/A'
+    for tf_str, tf_secs in TIMEFRAME_TO_SECONDS.items():
+        if tf_secs == current_granularity_seconds:
+            current_timeframe_str = tf_str
+            break
+    data_to_send['current_timeframe_string'] = current_timeframe_str
+    data_to_send['current_symbol'] = SYMBOL
+    return data_to_send
+
+def broadcast_to_frontend_clients():
+    """
+    Broadcasts the current market data (or delta) to all connected frontend WebSocket clients.
+    This function is intended to be called thread-safe from the asyncio loop.
+    """
+    global frontend_ws_clients, frontend_ws_clients_lock, last_broadcast_state
+    
+    current_full_payload = get_market_data_payload_for_frontend()
+    message_to_send = None
+    message_type_log = ""
+
+    with frontend_ws_clients_lock: # Protect access to last_broadcast_state and frontend_ws_clients
+        if not frontend_ws_clients: # No clients, nothing to do
+            # Still update last_broadcast_state so delta is correct for next time clients connect
+            last_broadcast_state = copy.deepcopy(current_full_payload)
+            logging.debug("No frontend clients connected. Updated last_broadcast_state for future deltas.")
+            return
+
+        if not last_broadcast_state: # If it's the very first broadcast and no client has connected yet to set it
+            logging.info("last_broadcast_state is empty (first broadcast cycle). Sending full data to all clients.")
+            message_to_send = {"type": "full", "data": current_full_payload}
+            message_type_log = "full data"
+        else:
+            changes, deleted_keys = compute_delta(last_broadcast_state, current_full_payload)
+            if changes or deleted_keys:
+                logging.debug(f"Delta computed: {len(changes)} changes, {len(deleted_keys)} deletions.")
+                message_to_send = {"type": "delta", "changes": changes, "deleted_keys": deleted_keys}
+                message_type_log = "delta"
+            else:
+                logging.debug("No changes detected. Skipping broadcast.")
+                # last_broadcast_state remains unchanged as current_full_payload is identical
+                return
+
+        # Update last_broadcast_state regardless of whether message was delta or full
+        # This must be a deepcopy because current_full_payload might be modified later or is based on market_data which changes
+        last_broadcast_state = copy.deepcopy(current_full_payload)
+        
+        if not message_to_send: # Should not happen if logic above is correct and (changes or deleted_keys) was true
+            logging.warning("Message to send is unexpectedly None after delta computation. Skipping broadcast.")
+            return
+
+        payload_json = json.dumps(message_to_send)
+        
+        clients_to_remove = set()
+        current_clients_snapshot = list(frontend_ws_clients) # Iterate over a snapshot
+
+    # Actual sending happens outside the lock on last_broadcast_state, but uses snapshot of clients
+    logging.debug(f"Broadcasting {message_type_log} to {len(current_clients_snapshot)} frontend clients.")
+    for client_ws in current_clients_snapshot:
+        try:
+            client_ws.send(payload_json)
+        except Exception as e:
+            logging.warning(f"Error sending {message_type_log} to frontend client {client_ws}: {e}. Marking for removal.")
+            clients_to_remove.add(client_ws)
+    
+    if clients_to_remove:
+        with frontend_ws_clients_lock: # Lock again to modify frontend_ws_clients
+            for client_ws in clients_to_remove:
+                frontend_ws_clients.discard(client_ws)
+            logging.info(f"Removed {len(clients_to_remove)} unresponsive frontend clients after broadcast attempt.")
+
+def compute_delta(old_state: dict, new_state: dict) -> tuple[dict, list]:
+    """
+    Computes the delta between two state dictionaries.
+    Returns a dictionary of changes and a list of deleted keys.
+    """
+    changes = {}
+    deleted_keys = []
+
+    old_keys = set(old_state.keys())
+    new_keys = set(new_state.keys())
+
+    # Check for deleted keys
+    for key in old_keys - new_keys:
+        deleted_keys.append(key)
+
+    # Check for new or changed keys
+    for key in new_keys:
+        if key not in old_keys: # New key
+            changes[key] = new_state[key]
+        elif old_state[key] != new_state[key]: # Changed key
+            # This handles lists (like timestamps, prices, ohlcv_candles, indicators) by replacing the whole list if it changed.
+            # For primitive types (strings, numbers, booleans), it compares directly.
+            changes[key] = new_state[key]
+            
+    return changes, deleted_keys
+
+def broadcast_system_message_to_frontend(system_message_payload):
+    """
+    Broadcasts a system message to all connected frontend WebSocket clients.
+    """
+    global frontend_ws_clients, frontend_ws_clients_lock
+    
+    if not frontend_ws_clients:
+        logging.debug("No frontend clients connected. Skipping system message broadcast.")
+        return
+
+    payload_json = json.dumps(system_message_payload)
+    
+    clients_to_remove = set()
+    # Create a snapshot for iteration under lock
+    with frontend_ws_clients_lock:
+        current_clients_snapshot = list(frontend_ws_clients)
+
+    logging.debug(f"Broadcasting system message to {len(current_clients_snapshot)} frontend clients: {system_message_payload.get('sub_type', 'N/A')}")
+    for client_ws in current_clients_snapshot:
+        try:
+            client_ws.send(payload_json)
+        except Exception as e:
+            logging.warning(f"Error sending system message to frontend client {client_ws}: {e}. Marking for removal.")
+            clients_to_remove.add(client_ws)
+    
+    if clients_to_remove:
+        with frontend_ws_clients_lock: # Lock again to modify the shared set
+            for client_ws in clients_to_remove:
+                frontend_ws_clients.discard(client_ws)
+            logging.info(f"Removed {len(clients_to_remove)} unresponsive frontend clients after system message broadcast attempt.")
+# --- End WebSocket Endpoint for Frontend ---
+
 
 @app.route('/api/set_chart_settings', methods=['POST'])
 def set_chart_settings_endpoint():
@@ -1990,14 +2250,49 @@ if __name__ == '__main__':
     ws_thread = threading.Thread(target=run_asyncio_loop_in_thread, daemon=True)
     ws_thread.start()
     
+    global last_broadcast_state # Ensure it's treated as global for initialization
     # Start Deriv WebSocket connection (initial, without token if not yet provided)
     logging.info("Waiting for asyncio event loop to be ready...")
     asyncio_loop_ready_event.wait() # Wait until the event is set
     logging.info("Asyncio event loop is ready.")
     
+    # Initialize last_broadcast_state with a structure similar to what clients expect
+    # This ensures the first delta computation has a valid base.
+    # It's done under lock to be safe, though at startup it might not be strictly necessary.
+    with frontend_ws_clients_lock:
+        # Populate with a structure that get_market_data_payload_for_frontend would return initially.
+        # This might involve calling it, or using a deepcopy of DEFAULT_MARKET_DATA and adding other necessary keys.
+        # For simplicity, let's assume an empty dict means "send full on first real broadcast"
+        # OR, more robustly, initialize it properly here.
+        # The current get_market_data_payload_for_frontend combines market_data with other globals.
+        # Let's initialize it based on DEFAULT_MARKET_DATA and add other static parts.
+        _initial_payload_structure = copy.deepcopy(DEFAULT_MARKET_DATA)
+        _initial_payload_structure['current_chart_type'] = current_chart_type # Global default
+        _initial_payload_structure['current_granularity_seconds'] = current_granularity_seconds # Global default
+        _initial_payload_structure['current_symbol'] = SYMBOL # Global default
+        _initial_timeframe_str = 'N/A'
+        for tf_str, tf_secs in TIMEFRAME_TO_SECONDS.items():
+            if tf_secs == current_granularity_seconds:
+                _initial_timeframe_str = tf_str
+                break
+        _initial_payload_structure['current_timeframe_string'] = _initial_timeframe_str
+        last_broadcast_state = _initial_payload_structure
+        logging.info("Initialized last_broadcast_state at startup.")
+
+
     if asyncio_loop and asyncio_loop.is_running(): # Double check, though event should ensure it
         start_deriv_ws() 
     else:
         logging.error("Asyncio loop reported ready, but is not running. WebSocket cannot be initialized.")
 
-    app.run(debug=True)
+    # Use Gunicorn or another WSGI server for production instead of app.run()
+    # For development with Flask's built-in server:
+    # app.run(debug=True) will not work well with Flask-Sock if multiple workers are used by reloader.
+    # Use host='0.0.0.0' to be accessible externally, and threaded=True is often good for dev.
+    # Note: Flask's dev server is single-threaded by default. `threaded=True` or `processes=N` can be used.
+    # However, for WebSockets, a single-threaded dev server or specific config might be needed
+    # if not using an ASGI server like Daphne or Uvicorn for Flask when WebSockets are involved.
+    # Flask-Sock is designed to work with WSGI servers.
+    # For `app.run`, ensure it's okay with Flask-Sock's model.
+    # Often, `app.run(debug=True, use_reloader=False)` is safer for complex setups during dev.
+    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False) # Added use_reloader=False for stability with threads/asyncio
