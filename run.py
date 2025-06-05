@@ -12,6 +12,10 @@ import queue
 import copy # For deepcopy
 import os
 import uuid
+import sqlite3 # Added
+from database import get_db_connection, create_tables # Added
+# json is already imported
+# datetime, timezone are already imported
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s')
@@ -19,40 +23,138 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %
 app = Flask(__name__)
 CORS(app)
 
+# Ensure database tables are created on application startup
+create_tables()
+logging.info("Database tables checked/created on startup.")
+
 # --- Strategy Management Globals and Functions ---
-STRATEGIES_FILE = "custom_strategies.json"
 custom_strategies = {} # In-memory storage for strategies: {strategy_id: strategy_object}
-strategies_lock = threading.Lock() # Lock for accessing custom_strategies and STRATEGIES_FILE
+strategies_lock = threading.Lock() # Lock for accessing custom_strategies
 
-def load_strategies_from_file():
+def load_strategies_from_db():
     global custom_strategies
-    with strategies_lock:
-        if os.path.exists(STRATEGIES_FILE):
-            try:
-                with open(STRATEGIES_FILE, 'r') as f:
-                    custom_strategies = json.load(f)
-                    logging.info(f"Loaded {len(custom_strategies)} strategies from {STRATEGIES_FILE}")
-            except json.JSONDecodeError:
-                logging.error(f"Error decoding JSON from {STRATEGIES_FILE}. Initializing with empty strategies.")
-                custom_strategies = {}
-            except Exception as e:
-                logging.error(f"Error loading strategies from {STRATEGIES_FILE}: {e}. Initializing with empty strategies.")
-                custom_strategies = {}
-        else:
-            logging.info(f"{STRATEGIES_FILE} not found. Initializing with empty strategies.")
-            custom_strategies = {}
+    logging.info("Loading strategies from database...")
+    conn = get_db_connection()
+    cursor = conn.cursor()
 
-def save_strategies_to_file():
+    # Fetch all non-deleted strategies
+    cursor.execute("SELECT * FROM strategies WHERE is_deleted = FALSE")
+    strategies_rows = cursor.fetchall()
+
+    new_strategies_cache = {}
+    for strategy_row in strategies_rows:
+        strategy_id = strategy_row['strategy_id']
+        logging.debug(f"Loading strategy ID: {strategy_id}")
+
+        # Fetch the latest version for this strategy
+        # Using created_at from strategy_versions for latest, as version_id might not always reflect true latest if old versions are imported later.
+        # Or, if version_id is guaranteed to be incremental for new versions, it's simpler. Assuming version_id is reliable for latest.
+        cursor.execute("""
+            SELECT * FROM strategy_versions
+            WHERE strategy_id = ?
+            ORDER BY version_id DESC
+            LIMIT 1
+        """, (strategy_id,))
+        latest_version_row = cursor.fetchone()
+
+        if latest_version_row:
+            try:
+                conditions_group = json.loads(latest_version_row['conditions_group'])
+                actions = json.loads(latest_version_row['actions'])
+
+                reconstructed_strategy = {
+                    "strategy_id": strategy_id,
+                    "strategy_name": strategy_row['strategy_name'], # From strategies table
+                    "description": strategy_row['description'], # From strategies table
+                    "conditions_group": conditions_group, # Parsed from version
+                    "actions": actions, # Parsed from version
+                    "is_active": bool(strategy_row['is_active']),
+                    "created_at": strategy_row['created_at'], # Original creation from strategies table
+                    "updated_at": strategy_row['updated_at'], # Last update from strategies table
+                    # "version_id": latest_version_row['version_id'], # Optional: if frontend needs to know
+                    # "version_notes": latest_version_row['version_notes'] # Optional
+                }
+                new_strategies_cache[strategy_id] = reconstructed_strategy
+                logging.debug(f"Successfully loaded and reconstructed strategy ID: {strategy_id} with version ID: {latest_version_row['version_id']}")
+            except json.JSONDecodeError as e:
+                logging.error(f"Error decoding JSON for strategy ID {strategy_id}, version ID {latest_version_row['version_id']}: {e}")
+            except Exception as e:
+                logging.error(f"Error processing strategy ID {strategy_id}, version ID {latest_version_row['version_id']}: {e}")
+        else:
+            logging.warning(f"No versions found for strategy ID: {strategy_id} in strategy_versions table. Skipping this strategy.")
+
+    conn.close()
     with strategies_lock:
-        try:
-            with open(STRATEGIES_FILE, 'w') as f:
-                json.dump(custom_strategies, f, indent=4)
-                logging.info(f"Saved {len(custom_strategies)} strategies to {STRATEGIES_FILE}")
-        except Exception as e:
-            logging.error(f"Error saving strategies to {STRATEGIES_FILE}: {e}")
+        custom_strategies = new_strategies_cache
+    logging.info(f"Loaded {len(custom_strategies)} strategies from database into memory.")
+
+def save_strategy_to_db(strategy_data, is_update=False):
+    """
+    Saves a strategy to the database. Creates a new strategy record and a version record,
+    or updates an existing strategy record and creates a new version record.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    strategy_id = strategy_data['strategy_id']
+    strategy_name = strategy_data['strategy_name']
+    description = strategy_data.get('description', '')
+    # is_active is handled by specific endpoints or defaults in table
+
+    current_time_utc_iso = datetime.now(timezone.utc).isoformat()
+
+    try:
+        if not is_update:
+            # New Strategy: Insert into strategies table
+            logging.info(f"Creating new strategy in DB with ID: {strategy_id}")
+            cursor.execute("""
+                INSERT INTO strategies (strategy_id, strategy_name, description, is_active, created_at, updated_at, is_deleted)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (strategy_id, strategy_name, description, strategy_data.get('is_active', True), current_time_utc_iso, current_time_utc_iso, False))
+        else:
+            # Existing Strategy: Update strategies table
+            logging.info(f"Updating existing strategy in DB with ID: {strategy_id}")
+            # is_active is usually updated by enable/disable endpoints, but can be part of general update too
+            is_active_val = strategy_data.get('is_active', None) # Get from payload if present
+            if is_active_val is not None:
+                 cursor.execute("""
+                    UPDATE strategies SET strategy_name = ?, description = ?, updated_at = ?, is_active = ?
+                    WHERE strategy_id = ?
+                """, (strategy_name, description, current_time_utc_iso, bool(is_active_val), strategy_id))
+            else: # Don't update is_active if not in payload
+                 cursor.execute("""
+                    UPDATE strategies SET strategy_name = ?, description = ?, updated_at = ?
+                    WHERE strategy_id = ?
+                """, (strategy_name, description, current_time_utc_iso, strategy_id))
+
+
+        # Always insert a new version into strategy_versions
+        logging.info(f"Creating new version for strategy ID: {strategy_id}")
+        conditions_group_json = json.dumps(strategy_data['conditions_group'])
+        actions_json = json.dumps(strategy_data.get('actions', []))
+        version_notes = strategy_data.get('version_notes', None) # Optional
+
+        cursor.execute("""
+            INSERT INTO strategy_versions (strategy_id, strategy_name, description, conditions_group, actions, version_notes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (strategy_id, strategy_name, description, conditions_group_json, actions_json, version_notes, current_time_utc_iso))
+
+        conn.commit()
+        logging.info(f"Strategy ID: {strategy_id} (is_update={is_update}) and its new version saved to DB successfully.")
+        return True
+    except sqlite3.Error as e:
+        conn.rollback()
+        logging.error(f"Database error saving strategy ID {strategy_id}: {e}")
+        return False
+    except Exception as e:
+        conn.rollback()
+        logging.error(f"Unexpected error saving strategy ID {strategy_id}: {e}")
+        return False
+    finally:
+        conn.close()
 
 # Load strategies at startup
-load_strategies_from_file()
+load_strategies_from_db()
 # --- End Strategy Management ---
 
 
@@ -1104,128 +1206,502 @@ def create_strategy():
         logging.warning(f"Bad request for creating strategy: {strategy_data}")
         return jsonify({"error": "Invalid strategy payload. 'strategy_name' and 'conditions_group' are required."}), 400
 
-    strategy_id = strategy_data.get('strategy_id', uuid.uuid4().hex)
+    # Check if strategy_id is provided and if it already exists in the DB (more robust than just checking memory)
+    # However, for a POST, we usually generate the ID.
+    # If strategy_id is in payload, it's more like an "upsert" or client-managed ID.
+    # For this implementation, we'll generate a new ID if one is not provided.
+    # If an ID is provided, we'll respect it but the save_strategy_to_db will fail if it already exists (due to PRIMARY KEY constraint on strategies.strategy_id)
+    # unless save_strategy_to_db is designed to handle that (e.g. with INSERT OR REPLACE, or checking existence first).
+    # Current save_strategy_to_db will fail on INSERT if ID exists. This is acceptable for POST.
+
+    strategy_id = strategy_data.get('strategy_id')
+    if not strategy_id: # If no ID provided, generate one
+        strategy_id = uuid.uuid4().hex
+        strategy_data['strategy_id'] = strategy_id # Add to payload for saving
+    else: # ID provided, check if it exists in memory (quick check, DB is the source of truth)
+        with strategies_lock:
+            if strategy_id in custom_strategies:
+                logging.warning(f"Attempt to create strategy with existing ID (from payload): {strategy_id}")
+                return jsonify({"error": f"Strategy with ID {strategy_id} already exists. Use PUT to update or omit ID for new."}), 409
+
+    # Prepare the full strategy object for saving (includes all fields for tables)
+    # `save_strategy_to_db` will use current time for created_at/updated_at for the strategy record
+    # and created_at for the version record.
     
-    with strategies_lock:
-        if strategy_id in custom_strategies:
-             # If user provides an ID that already exists, it's a conflict, unless we decide PUT-like behavior for POST
-             # For strict POST, generate a new ID if one is not provided or if provided one conflicts.
-             # Simpler: if ID is given and exists, error. If not given, generate.
-             if strategy_data.get('strategy_id'): # If ID was in payload
-                logging.warning(f"Attempt to create strategy with existing ID: {strategy_id}")
-                return jsonify({"error": f"Strategy with ID {strategy_id} already exists. Use PUT to update or omit ID for new."}), 409 # Conflict
-             else: # ID was generated
-                 while strategy_id in custom_strategies: # Ensure generated ID is unique (highly unlikely for UUID, but good practice)
-                     strategy_id = uuid.uuid4().hex
+    # Ensure all required fields for DB are present before calling save_strategy_to_db
+    full_strategy_payload_for_db = {
+        "strategy_id": strategy_id,
+        "strategy_name": strategy_data["strategy_name"],
+        "description": strategy_data.get("description", ""),
+        "conditions_group": strategy_data["conditions_group"], # Must exist
+        "actions": strategy_data.get("actions", []),
+        "is_active": strategy_data.get("is_active", True),
+        "version_notes": strategy_data.get("version_notes", f"Initial version created on {datetime.now(timezone.utc).isoformat()}") # Example default notes
+    }
+
+    if save_strategy_to_db(full_strategy_payload_for_db, is_update=False):
+        # After successful save, update in-memory cache
+        # Reconstruct what the strategy would look like if loaded from DB
+        # Or, more simply, just reload all strategies to ensure consistency.
+        # For now, let's construct it to return, and then client might re-fetch or we rely on next full load.
+        # A better approach: save_strategy_to_db could return the created object, or load_strategies_from_db can be called.
         
-        new_strategy = {
+        # Re-create the object as it would be loaded to be returned in response
+        created_strategy_for_response = {
             "strategy_id": strategy_id,
-            "strategy_name": strategy_data.get("strategy_name"),
-            "description": strategy_data.get("description", ""),
-            "conditions_group": strategy_data.get("conditions_group"),
-            "actions": strategy_data.get("actions", []),
-            "is_active": strategy_data.get("is_active", True), # Added is_active field
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "updated_at": datetime.now(timezone.utc).isoformat()
+            "strategy_name": full_strategy_payload_for_db["strategy_name"],
+            "description": full_strategy_payload_for_db["description"],
+            "conditions_group": full_strategy_payload_for_db["conditions_group"],
+            "actions": full_strategy_payload_for_db["actions"],
+            "is_active": full_strategy_payload_for_db["is_active"],
+            "created_at": datetime.now(timezone.utc).isoformat(), # This will be set by DB, approximate here
+            "updated_at": datetime.now(timezone.utc).isoformat()  # This will be set by DB, approximate here
         }
-        custom_strategies[strategy_id] = new_strategy
-    
-    save_strategies_to_file()
-    logging.info(f"Created strategy with ID: {strategy_id}, Name: {new_strategy['strategy_name']}")
-    return jsonify(new_strategy), 201
+        # Update in-memory cache (important!)
+        with strategies_lock:
+            custom_strategies[strategy_id] = created_strategy_for_response # Add to cache
+
+        logging.info(f"Created strategy via API with ID: {strategy_id}, Name: {full_strategy_payload_for_db['strategy_name']}")
+        return jsonify(created_strategy_for_response), 201
+    else:
+        # This case implies a DB error during save_strategy_to_db
+        # It could be due to various reasons, e.g. strategy_id (if client-provided) already exists.
+        # The save_strategy_to_db function logs the specific DB error.
+        logging.error(f"Failed to save new strategy (ID: {strategy_id}) to database.")
+        # Check if ID was client provided and might be a duplicate
+        if strategy_data.get('strategy_id'): # If client provided ID
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT strategy_id FROM strategies WHERE strategy_id = ?", (strategy_id,))
+            if cursor.fetchone():
+                conn.close()
+                return jsonify({"error": f"Strategy with ID {strategy_id} already exists in DB. Use PUT to update or ensure ID is unique."}), 409 # Conflict
+            conn.close()
+
+        return jsonify({"error": "Failed to create strategy due to a database issue."}), 500
+
 
 @app.route('/api/strategies', methods=['GET'], strict_slashes=False)
 def get_all_strategies():
+    # This endpoint should reflect the current state from the in-memory cache,
+    # which is loaded from DB at startup and potentially updated after CUD operations.
     with strategies_lock:
         # Return a list of strategy objects, not the dict itself
         return jsonify(list(custom_strategies.values()))
 
 @app.route('/api/strategies/<strategy_id>', methods=['GET'], strict_slashes=False)
 def get_strategy_by_id(strategy_id):
-    with strategies_lock:
+    with strategies_lock: # Access the in-memory cache
         strategy = custom_strategies.get(strategy_id)
     if strategy:
+        # Ensure the strategy is not marked as deleted in DB, though load_strategies_from_db should handle this.
+        # This is a redundant check if cache is always consistent.
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT is_deleted FROM strategies WHERE strategy_id = ?", (strategy_id,))
+        db_strategy_status = cursor.fetchone()
+        conn.close()
+        if db_strategy_status and db_strategy_status['is_deleted']:
+            # Strategy is marked deleted in DB, so remove from cache if it's there by mistake
+            with strategies_lock:
+                if strategy_id in custom_strategies: custom_strategies.pop(strategy_id)
+            logging.warning(f"Strategy with ID {strategy_id} found in cache but is deleted in DB. Cache corrected.")
+            return jsonify({"error": "Strategy not found (marked as deleted)"}), 404
+
         return jsonify(strategy)
     else:
-        logging.warning(f"Strategy with ID {strategy_id} not found (GET).")
+        logging.warning(f"Strategy with ID {strategy_id} not found in cache (GET).")
         return jsonify({"error": "Strategy not found"}), 404
 
 @app.route('/api/strategies/<strategy_id>', methods=['PUT'], strict_slashes=False)
 def update_strategy(strategy_id):
-    global custom_strategies
     strategy_updates = request.get_json()
 
     if not isinstance(strategy_updates, dict):
         return jsonify({"error": "Invalid payload. Expected a JSON object."}), 400
 
-    with strategies_lock:
+    with strategies_lock: # Check existence in cache first
         if strategy_id not in custom_strategies:
-            logging.warning(f"Strategy with ID {strategy_id} not found (PUT).")
-            return jsonify({"error": "Strategy not found"}), 404
+            logging.warning(f"Strategy with ID {strategy_id} not found in cache (PUT).")
+            # Optionally, verify against DB if cache might be stale
+            conn_check = get_db_connection()
+            cursor_check = conn_check.cursor()
+            cursor_check.execute("SELECT strategy_id FROM strategies WHERE strategy_id = ? AND is_deleted = FALSE", (strategy_id,))
+            if not cursor_check.fetchone():
+                conn_check.close()
+                return jsonify({"error": "Strategy not found in database"}), 404
+            conn_check.close()
+            # If found in DB but not cache, it implies cache inconsistency. Log it.
+            logging.warning(f"Strategy {strategy_id} found in DB but not in cache. Cache might be inconsistent.")
+            # Proceeding with update, but ideally cache should be consistent.
+            # For robust solution, one might load the strategy here before updating.
 
-        existing_strategy = custom_strategies[strategy_id]
+    # Prepare data for saving. Merge updates with existing data (from cache, or load if not in cache but in DB).
+    # The save_strategy_to_db function will handle creating a new version.
+    # We need to provide the full strategy data for the new version.
+
+    # Get current state from cache to merge
+    current_strategy_state = None
+    with strategies_lock:
+        current_strategy_state = copy.deepcopy(custom_strategies.get(strategy_id)) # Use deepcopy if complex objects
+
+    if not current_strategy_state: # If, after all, it's not in cache (e.g. race condition or inconsistency)
+        # Attempt to load it directly from DB to ensure we have the latest before updating
+        # This is a fallback; ideally, the cache check above or a lock around the entire operation would be better.
+        load_strategies_from_db() # Reload all; simpler than loading one and risking more inconsistency
+        with strategies_lock:
+            current_strategy_state = copy.deepcopy(custom_strategies.get(strategy_id))
+        if not current_strategy_state:
+             logging.error(f"Strategy {strategy_id} could not be loaded for update even after DB refresh.")
+             return jsonify({"error": "Strategy not found for update after DB refresh check."}), 404
+
+
+    # Construct the full payload for save_strategy_to_db, applying updates
+    updated_strategy_payload_for_db = {
+        "strategy_id": strategy_id, # Must be the same
+        "strategy_name": strategy_updates.get("strategy_name", current_strategy_state["strategy_name"]),
+        "description": strategy_updates.get("description", current_strategy_state.get("description")), # Use .get for safety
+        "conditions_group": strategy_updates.get("conditions_group", current_strategy_state["conditions_group"]),
+        "actions": strategy_updates.get("actions", current_strategy_state.get("actions")),
+        "is_active": strategy_updates.get("is_active", current_strategy_state.get("is_active")), # is_active can be updated here too
+        "version_notes": strategy_updates.get("version_notes", f"Updated on {datetime.now(timezone.utc).isoformat()}")
+    }
+
+    if save_strategy_to_db(updated_strategy_payload_for_db, is_update=True):
+        # Update in-memory cache with the new state (reflecting new updated_at, and potentially new name/desc from version)
+        # The save_strategy_to_db updated `strategies` table's `updated_at`, `strategy_name`, `description`.
+        # The versioned part (conditions, actions) is in `strategy_versions`.
+        # `load_strategies_from_db` correctly reconstructs this. So, best to reload.
         
-        # Update fields if present in the payload
-        existing_strategy["strategy_name"] = strategy_updates.get("strategy_name", existing_strategy["strategy_name"])
-        existing_strategy["description"] = strategy_updates.get("description", existing_strategy["description"])
-        existing_strategy["conditions_group"] = strategy_updates.get("conditions_group", existing_strategy["conditions_group"])
-        existing_strategy["actions"] = strategy_updates.get("actions", existing_strategy["actions"])
-        existing_strategy["is_active"] = strategy_updates.get("is_active", existing_strategy.get("is_active", True)) # Added is_active field
-        existing_strategy["updated_at"] = datetime.now(timezone.utc).isoformat()
+        load_strategies_from_db() # Reload all strategies to reflect the update and new version.
+                                  # This ensures the cache is perfectly consistent with DB.
         
-        custom_strategies[strategy_id] = existing_strategy
-    
-    save_strategies_to_file()
-    logging.info(f"Updated strategy with ID: {strategy_id}")
-    return jsonify(existing_strategy)
+        with strategies_lock: # Get the reloaded strategy for the response
+            final_updated_strategy_for_response = custom_strategies.get(strategy_id)
+
+        if final_updated_strategy_for_response:
+            logging.info(f"Updated strategy with ID: {strategy_id} in DB and reloaded cache.")
+            return jsonify(final_updated_strategy_for_response)
+        else:
+            # This should not happen if save was successful and load_strategies_from_db works
+            logging.error(f"Strategy {strategy_id} disappeared from cache after successful update and reload.")
+            return jsonify({"error": "Failed to reflect update in cache, though DB operation might be successful."}), 500
+    else:
+        logging.error(f"Failed to update strategy {strategy_id} in database.")
+        return jsonify({"error": "Failed to update strategy due to a database issue."}), 500
 
 @app.route('/api/strategies/<strategy_id>', methods=['DELETE'], strict_slashes=False)
 def delete_strategy(strategy_id):
-    global custom_strategies
-    with strategies_lock:
-        if strategy_id not in custom_strategies:
-            logging.warning(f"Strategy with ID {strategy_id} not found (DELETE).")
+    # This will be a soft delete.
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        # Check if strategy exists and is not already deleted
+        cursor.execute("SELECT strategy_id, strategy_name, is_deleted FROM strategies WHERE strategy_id = ?", (strategy_id,))
+        strategy_to_delete = cursor.fetchone()
+
+        if not strategy_to_delete:
+            conn.close()
+            logging.warning(f"Strategy with ID {strategy_id} not found in DB (DELETE).")
             return jsonify({"error": "Strategy not found"}), 404
         
-        deleted_strategy_name = custom_strategies[strategy_id].get("strategy_name", "N/A")
-        del custom_strategies[strategy_id]
-    
-    save_strategies_to_file()
-    logging.info(f"Deleted strategy with ID: {strategy_id}, Name: {deleted_strategy_name}")
-    return jsonify({"message": "Strategy deleted successfully"}), 200
+        if strategy_to_delete['is_deleted']:
+            conn.close()
+            logging.info(f"Strategy with ID {strategy_id} is already marked as deleted (DELETE).")
+            # Remove from cache if it's still there
+            with strategies_lock:
+                if strategy_id in custom_strategies: custom_strategies.pop(strategy_id)
+            return jsonify({"message": "Strategy was already deleted"}), 200
+
+        # Perform soft delete
+        current_time_utc_iso = datetime.now(timezone.utc).isoformat()
+        cursor.execute("""
+            UPDATE strategies
+            SET is_deleted = TRUE, is_active = FALSE, updated_at = ?
+            WHERE strategy_id = ?
+        """, (current_time_utc_iso, strategy_id))
+        conn.commit()
+
+        deleted_strategy_name = strategy_to_delete['strategy_name']
+        logging.info(f"Soft-deleted strategy with ID: {strategy_id}, Name: {deleted_strategy_name}")
+
+        # Remove from in-memory cache
+        with strategies_lock:
+            if strategy_id in custom_strategies:
+                del custom_strategies[strategy_id]
+
+        return jsonify({"message": f"Strategy '{deleted_strategy_name}' (ID: {strategy_id}) soft-deleted successfully"}), 200
+
+    except sqlite3.Error as e:
+        conn.rollback()
+        logging.error(f"Database error soft-deleting strategy ID {strategy_id}: {e}")
+        return jsonify({"error": "Failed to delete strategy due to a database issue."}), 500
+    finally:
+        if conn: conn.close()
+
 
 @app.route('/api/strategies/<strategy_id>/enable', methods=['POST'], strict_slashes=False)
 def enable_strategy(strategy_id):
-    with strategies_lock:
-        global custom_strategies
-        if strategy_id not in custom_strategies:
-            logging.warning(f"Strategy with ID {strategy_id} not found (ENABLE).")
-            return jsonify({"error": "Strategy not found"}), 404
-        
-        custom_strategies[strategy_id]['is_active'] = True
-        custom_strategies[strategy_id]['updated_at'] = datetime.now(timezone.utc).isoformat()
-        save_strategies_to_file()
-        logging.info(f"Enabled strategy with ID: {strategy_id}, Name: {custom_strategies[strategy_id].get('strategy_name', 'N/A')}")
-        return jsonify(custom_strategies[strategy_id]), 200
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        current_time_utc_iso = datetime.now(timezone.utc).isoformat()
+        cursor.execute("UPDATE strategies SET is_active = TRUE, updated_at = ? WHERE strategy_id = ? AND is_deleted = FALSE", (current_time_utc_iso, strategy_id))
+        updated_rows = cursor.rowcount
+        conn.commit()
+
+        if updated_rows > 0:
+            # Update cache
+            with strategies_lock:
+                if strategy_id in custom_strategies:
+                    custom_strategies[strategy_id]['is_active'] = True
+                    custom_strategies[strategy_id]['updated_at'] = current_time_utc_iso
+                    strategy_name_for_log = custom_strategies[strategy_id].get('strategy_name', 'N/A')
+                    logging.info(f"Enabled strategy in DB & Cache: ID {strategy_id}, Name: {strategy_name_for_log}")
+                    return jsonify(custom_strategies[strategy_id]), 200
+                else: # DB updated but not in cache - inconsistency
+                    load_strategies_from_db() # Reload to fix cache
+                    if strategy_id in custom_strategies and custom_strategies[strategy_id]['is_active']:
+                         logging.info(f"Enabled strategy in DB, reloaded cache. ID: {strategy_id}")
+                         return jsonify(custom_strategies[strategy_id]), 200
+                    else:
+                         logging.error(f"Failed to enable strategy {strategy_id} or reflect in cache properly after DB update.")
+                         return jsonify({"error": "Strategy state in cache unclear after enable."}), 500
+        else:
+            # Check if strategy exists at all or is deleted
+            cursor.execute("SELECT strategy_id, is_deleted FROM strategies WHERE strategy_id = ?", (strategy_id,))
+            exists = cursor.fetchone()
+            if not exists or exists['is_deleted']:
+                logging.warning(f"Strategy with ID {strategy_id} not found or is deleted (ENABLE).")
+                return jsonify({"error": "Strategy not found or is deleted"}), 404
+            else: # Exists, not deleted, but wasn't updated (maybe already active, or other issue)
+                 logging.warning(f"Strategy {strategy_id} enable did not update any rows, might be already active or other issue.")
+                 # To be safe, reload and return current state
+                 load_strategies_from_db()
+                 with strategies_lock:
+                    if strategy_id in custom_strategies: return jsonify(custom_strategies[strategy_id]), 200
+                    else: return jsonify({"error": "Strategy not found after attempting enable"}), 404
+
+
+    except sqlite3.Error as e:
+        conn.rollback()
+        logging.error(f"Database error enabling strategy {strategy_id}: {e}")
+        return jsonify({"error": "Database error enabling strategy"}), 500
+    finally:
+        if conn: conn.close()
+
 
 @app.route('/api/strategies/<strategy_id>/disable', methods=['POST'], strict_slashes=False)
 def disable_strategy(strategy_id):
-    with strategies_lock:
-        global custom_strategies
-        if strategy_id not in custom_strategies:
-            logging.warning(f"Strategy with ID {strategy_id} not found (DISABLE).")
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        current_time_utc_iso = datetime.now(timezone.utc).isoformat()
+        cursor.execute("UPDATE strategies SET is_active = FALSE, updated_at = ? WHERE strategy_id = ? AND is_deleted = FALSE", (current_time_utc_iso, strategy_id))
+        updated_rows = cursor.rowcount
+        conn.commit()
+
+        if updated_rows > 0:
+            # Update cache
+            with strategies_lock:
+                if strategy_id in custom_strategies:
+                    custom_strategies[strategy_id]['is_active'] = False
+                    custom_strategies[strategy_id]['updated_at'] = current_time_utc_iso
+                    strategy_name_for_log = custom_strategies[strategy_id].get('strategy_name', 'N/A')
+                    logging.info(f"Disabled strategy in DB & Cache: ID {strategy_id}, Name: {strategy_name_for_log}")
+                    return jsonify(custom_strategies[strategy_id]), 200
+                else: # DB updated but not in cache - inconsistency
+                    load_strategies_from_db() # Reload to fix cache
+                    if strategy_id in custom_strategies and not custom_strategies[strategy_id]['is_active']:
+                         logging.info(f"Disabled strategy in DB, reloaded cache. ID: {strategy_id}")
+                         return jsonify(custom_strategies[strategy_id]), 200
+                    else:
+                         logging.error(f"Failed to disable strategy {strategy_id} or reflect in cache properly after DB update.")
+                         return jsonify({"error": "Strategy state in cache unclear after disable."}), 500
+        else:
+            # Check if strategy exists at all or is deleted
+            cursor.execute("SELECT strategy_id, is_deleted FROM strategies WHERE strategy_id = ?", (strategy_id,))
+            exists = cursor.fetchone()
+            if not exists or exists['is_deleted']:
+                logging.warning(f"Strategy with ID {strategy_id} not found or is deleted (DISABLE).")
+                return jsonify({"error": "Strategy not found or is deleted"}), 404
+            else: # Exists, not deleted, but wasn't updated (maybe already inactive)
+                 logging.warning(f"Strategy {strategy_id} disable did not update any rows, might be already inactive or other issue.")
+                 load_strategies_from_db()
+                 with strategies_lock:
+                    if strategy_id in custom_strategies: return jsonify(custom_strategies[strategy_id]), 200
+                    else: return jsonify({"error": "Strategy not found after attempting disable"}), 404
+
+    except sqlite3.Error as e:
+        conn.rollback()
+        logging.error(f"Database error disabling strategy {strategy_id}: {e}")
+        return jsonify({"error": "Database error disabling strategy"}), 500
+    finally:
+        if conn: conn.close()
+
+@app.route('/api/strategies/<strategy_id>/history', methods=['GET'], strict_slashes=False)
+def get_strategy_history(strategy_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # First, check if the base strategy exists and is not deleted
+        cursor.execute("SELECT strategy_id FROM strategies WHERE strategy_id = ? AND is_deleted = FALSE", (strategy_id,))
+        if not cursor.fetchone():
+            logging.warning(f"History requested for non-existent or deleted strategy ID: {strategy_id}")
             return jsonify({"error": "Strategy not found"}), 404
-            
-        custom_strategies[strategy_id]['is_active'] = False
-        custom_strategies[strategy_id]['updated_at'] = datetime.now(timezone.utc).isoformat()
-        save_strategies_to_file()
-        logging.info(f"Disabled strategy with ID: {strategy_id}, Name: {custom_strategies[strategy_id].get('strategy_name', 'N/A')}")
-        return jsonify(custom_strategies[strategy_id]), 200
+
+        cursor.execute("""
+            SELECT version_id, strategy_id, strategy_name, description, conditions_group, actions, version_notes, created_at
+            FROM strategy_versions
+            WHERE strategy_id = ?
+            ORDER BY version_id DESC
+        """, (strategy_id,))
+
+        versions_rows = cursor.fetchall()
+        history = []
+        for row in versions_rows:
+            try:
+                version_data = dict(row) # Convert SQLite Row to dict
+                version_data['conditions_group'] = json.loads(row['conditions_group'])
+                version_data['actions'] = json.loads(row['actions'])
+                history.append(version_data)
+            except json.JSONDecodeError as e:
+                logging.error(f"Error decoding JSON for strategy ID {strategy_id}, version ID {row['version_id']} in history: {e}")
+                # Skip this version or add with raw data? For now, skip.
+            except Exception as e:
+                logging.error(f"Error processing version ID {row['version_id']} for strategy {strategy_id} in history: {e}")
+
+        logging.info(f"Retrieved {len(history)} versions for strategy ID: {strategy_id}")
+        return jsonify(history)
+
+    except sqlite3.Error as e:
+        logging.error(f"Database error retrieving history for strategy ID {strategy_id}: {e}")
+        return jsonify({"error": "Database error retrieving strategy history."}), 500
+    finally:
+        if conn: conn.close()
+
+@app.route('/api/strategies/<strategy_id>/rollback/<int:version_id>', methods=['POST'], strict_slashes=False)
+def rollback_strategy_version(strategy_id, version_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # 1. Validate base strategy
+        cursor.execute("SELECT strategy_id, is_active FROM strategies WHERE strategy_id = ? AND is_deleted = FALSE", (strategy_id,))
+        base_strategy = cursor.fetchone()
+        if not base_strategy:
+            conn.close()
+            logging.warning(f"Rollback requested for non-existent or deleted strategy ID: {strategy_id}")
+            return jsonify({"error": "Base strategy not found or has been deleted"}), 404
+
+        # 2. Validate target version
+        cursor.execute("""
+            SELECT strategy_name, description, conditions_group, actions
+            FROM strategy_versions
+            WHERE strategy_id = ? AND version_id = ?
+        """, (strategy_id, version_id))
+        target_version_data = cursor.fetchone()
+
+        if not target_version_data:
+            conn.close()
+            logging.warning(f"Target version ID {version_id} not found for strategy ID {strategy_id} (Rollback).")
+            return jsonify({"error": f"Version ID {version_id} not found for strategy {strategy_id}"}), 404
+
+        # 3. Perform Rollback (Update main strategy table, Create new version)
+        current_time_utc_iso = datetime.now(timezone.utc).isoformat()
+
+        # Update the main 'strategies' table entry
+        # Preserve original is_active state from base_strategy['is_active']
+        # Or, decide to always make it active on rollback: base_strategy_is_active = True
+        base_strategy_is_active = bool(base_strategy['is_active'])
+
+        logging.info(f"Rolling back strategy {strategy_id} to version {version_id}. Current is_active: {base_strategy_is_active}")
+
+        cursor.execute("""
+            UPDATE strategies
+            SET strategy_name = ?, description = ?, updated_at = ?, is_active = ?
+            WHERE strategy_id = ?
+        """, (target_version_data['strategy_name'], target_version_data['description'], current_time_utc_iso, base_strategy_is_active, strategy_id))
+
+        # Insert a new version entry in 'strategy_versions' reflecting this rollback
+        new_version_notes = f"Rolled back to version {version_id} data on {current_time_utc_iso}."
+
+        # The conditions_group and actions are already JSON strings in target_version_data if fetched directly from DB
+        # No, they are Python dicts because row_factory = sqlite3.Row and then we might have dict access.
+        # The 'save_strategy_to_db' function expects python dicts for conditions_group and actions.
+        # Here, target_version_data['conditions_group'] and ['actions'] are already JSON strings from the DB.
+        # So we need to parse them first, then they will be re-stringified by save_strategy_to_db logic, OR
+        # we directly use them if the save_strategy_to_db is not used, which is the case here.
+        # The save_strategy_to_db function itself handles the JSON stringification.
+        # Let's prepare a payload similar to what save_strategy_to_db's versioning part expects.
+
+        payload_for_new_version = {
+            "strategy_id": strategy_id,
+            "strategy_name": target_version_data['strategy_name'],
+            "description": target_version_data['description'],
+            "conditions_group": json.loads(target_version_data['conditions_group']), # Parse for save_strategy_to_db or direct insert
+            "actions": json.loads(target_version_data['actions']), # Parse for save_strategy_to_db or direct insert
+            "version_notes": new_version_notes,
+            # is_active is part of the main strategy table, not typically versioned directly in strategy_versions in this way
+        }
+
+        # Re-using the version creation logic from save_strategy_to_db is better if possible.
+        # For now, direct insert:
+        cursor.execute("""
+            INSERT INTO strategy_versions (strategy_id, strategy_name, description, conditions_group, actions, version_notes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            strategy_id,
+            payload_for_new_version['strategy_name'],
+            payload_for_new_version['description'],
+            json.dumps(payload_for_new_version['conditions_group']), # Stringify here for direct insert
+            json.dumps(payload_for_new_version['actions']), # Stringify here
+            payload_for_new_version['version_notes'],
+            current_time_utc_iso
+        ))
+
+        new_rolled_back_version_id = cursor.lastrowid
+        conn.commit()
+
+        logging.info(f"Strategy {strategy_id} rolled back to data from version {version_id}. New version created: {new_rolled_back_version_id}.")
+
+        # 4. Update in-memory cache
+        load_strategies_from_db() # Reload all strategies to reflect the change.
+
+        with strategies_lock: # Get the reloaded strategy for response
+            reloaded_strategy = custom_strategies.get(strategy_id)
+
+        if reloaded_strategy:
+             # Add the new version_id to the response for clarity
+            reloaded_strategy['rolled_back_to_source_version_id'] = version_id
+            reloaded_strategy['new_current_version_id'] = new_rolled_back_version_id
+            return jsonify({
+                "message": f"Strategy {strategy_id} successfully rolled back to version {version_id}.",
+                "strategy_details": reloaded_strategy
+            }), 200
+        else: # Should not happen
+            logging.error(f"Strategy {strategy_id} disappeared from cache after successful rollback and reload.")
+            return jsonify({"error": "Rollback successful but failed to reload strategy into cache."}), 500
+
+    except sqlite3.Error as e:
+        if conn: conn.rollback()
+        logging.error(f"Database error rolling back strategy ID {strategy_id} to version {version_id}: {e}")
+        return jsonify({"error": "Database error during rollback."}), 500
+    except json.JSONDecodeError as e:
+        if conn: conn.rollback()
+        logging.error(f"JSON error during rollback for strategy {strategy_id} to version {version_id}: {e}")
+        return jsonify({"error": "Error processing strategy data during rollback."}), 500
+    except Exception as e:
+        if conn: conn.rollback()
+        logging.exception(f"Unexpected error during rollback of strategy {strategy_id} to version {version_id}: {e}")
+        return jsonify({"error": f"An unexpected error occurred: {str(e)}"}), 500
+    finally:
+        if conn: conn.close()
 
 start_deriv_ws()
 
 if __name__ == '__main__':
     # Note: app.run(debug=True) is suitable for development.
     # For production, use a proper WSGI server like Gunicorn or Waitress.
-    # load_strategies_from_file() # Already called above after app initialization
+    # load_strategies_from_db() # Already called above after app initialization
     app.run(debug=True)
