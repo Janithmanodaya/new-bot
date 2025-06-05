@@ -20,6 +20,7 @@ import asyncio # Added for websockets
 from asyncio import Semaphore # Added for rate limiting
 import websockets # Added for websockets
 # threading is already imported
+from threading import Event as ThreadingEvent # Explicitly import Event for clarity
 from concurrent.futures import ThreadPoolExecutor # Added for async indicators
 
 # Configure logging
@@ -462,6 +463,7 @@ def calculate_indicators(data_input):
 ws_app = None # Will hold the websockets client connection object
 ws_thread = None # Thread for running the asyncio event loop
 asyncio_loop = None # The asyncio event loop
+asyncio_loop_ready_event = ThreadingEvent() # Event to signal asyncio loop is ready
 current_ws_task = None # The current asyncio.Task for connect_and_listen
 executor = ThreadPoolExecutor(max_workers=4) # Added for async indicators
 indicator_cache = {} # Added for caching indicator results
@@ -872,12 +874,17 @@ async def recv_loop(ws):
 
 
 def run_asyncio_loop_in_thread():
-    global asyncio_loop
+    global asyncio_loop, asyncio_loop_ready_event
     asyncio_loop = asyncio.new_event_loop()
     asyncio.set_event_loop(asyncio_loop)
-    logging.info("Asyncio event loop started in dedicated thread.")
-    asyncio_loop.run_forever()
-    logging.info("Asyncio event loop in dedicated thread has stopped.")
+    logging.info("Asyncio event loop created and set in dedicated thread.")
+    asyncio_loop_ready_event.set() # Signal that the loop is ready and set for this thread
+
+    try:
+        asyncio_loop.run_forever()
+    finally:
+        asyncio_loop.close() # Clean up the loop when run_forever returns
+        logging.info("Asyncio event loop in dedicated thread has been closed.")
 
 
 async def _connect_and_listen_deriv():
@@ -939,7 +946,7 @@ async def _connect_and_listen_deriv():
 
 def start_deriv_ws(token=None):
     global API_TOKEN, market_data, current_tick_subscription_id, in_progress_ohlcv_candle, asyncio_loop, current_ws_task, ws_app, current_reconnect_delay
-    
+
     if token:
         API_TOKEN = token
         logging.info(f"API Token set for Deriv WS connection.")
@@ -968,10 +975,9 @@ def start_deriv_ws(token=None):
 
     logging.info(f"Creating new asyncio task for Deriv WebSocket connection for SYMBOL: {SYMBOL}.")
     # Schedule the _connect_and_listen_deriv coroutine to run on the asyncio_loop
-    current_ws_task = asyncio.run_coroutine_threadsafe(_connect_and_listen_deriv(), asyncio_loop).result(timeout=0.1) # Check if task creation is successful
-    # Note: .result(timeout=0.1) on run_coroutine_threadsafe is just to quickly check if scheduling itself failed,
-    # not for the completion of _connect_and_listen_deriv().
-    # The task runs in the background.
+    current_ws_task = asyncio.run_coroutine_threadsafe(_connect_and_listen_deriv(), asyncio_loop)
+    # The current_ws_task variable now holds the Future associated with the execution of the coroutine.
+    # We don't call .result() here as _connect_and_listen_deriv is a long-running task.
 
     logging.info("Deriv WebSocket connection process initiated via asyncio task.")
 
@@ -1954,11 +1960,13 @@ if __name__ == '__main__':
     ws_thread.start()
 
     # Start Deriv WebSocket connection (initial, without token if not yet provided)
-    # Wait a moment for the loop to be ready.
-    time.sleep(0.5) # Simple way to wait for loop; more robust would use an event.
-    if asyncio_loop and asyncio_loop.is_running():
+    logging.info("Waiting for asyncio event loop to be ready...")
+    asyncio_loop_ready_event.wait() # Wait until the event is set
+    logging.info("Asyncio event loop is ready.")
+
+    if asyncio_loop and asyncio_loop.is_running(): # Double check, though event should ensure it
         start_deriv_ws()
     else:
-        logging.error("Failed to start asyncio loop, WebSocket cannot be initialized.")
+        logging.error("Asyncio loop reported ready, but is not running. WebSocket cannot be initialized.")
 
     app.run(debug=True)
