@@ -22,6 +22,7 @@ import websockets # Added for websockets
 # threading is already imported
 from threading import Event as ThreadingEvent # Explicitly import Event for clarity
 from concurrent.futures import ThreadPoolExecutor # Added for async indicators
+import inspect # Added for getting line numbers in logs
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s')
@@ -535,7 +536,7 @@ async def on_message_for_deriv(ws, message_str):
     global market_data, SYMBOL, current_tick_subscription_id, current_chart_type, current_granularity_seconds, in_progress_ohlcv_candle
     global pending_api_requests, api_response_events, api_response_data, shared_data_lock, market_data_lock
     
-    # logging.debug(f"Async Raw WS message received: {message_str[:500]}")
+    # logging.debug(f"Async Raw WS message received: {message_str[:500]}") # This line was already correct.
     data = json.loads(message_str)
 
     req_id_of_message = data.get('echo_req', {}).get('req_id')
@@ -560,7 +561,7 @@ async def on_message_for_deriv(ws, message_str):
                  if req_id_of_message in pending_api_requests:
                     pending_api_requests.pop(req_id_of_message)
         
-        logging.error(f"Deriv API Error for req_id {req_id_of_message} (type: {failed_req_type_str}): {error_details}. Full message: {message}")
+        logging.error(f"Deriv API Error for req_id {req_id_of_message} (type: {failed_req_type_str}): {error_details}. Full message: {message_str}") # This line was already correct from a previous step.
         
         if event_to_set: # Must be outside lock to prevent deadlock if event waiter tries to acquire lock
             event_to_set.set()
@@ -606,7 +607,7 @@ async def on_message_for_deriv(ws, message_str):
             logging.info(f"Successfully subscribed to ticks. ID: {current_tick_subscription_id}. Symbol: {data.get('echo_req',{}).get('ticks')}")
     
     elif msg_type == 'forget':
-        logging.info(f"Full 'forget' response: {message[:200]}. Req ID: {req_id_of_message}")
+        logging.info(f"Full 'forget' response: {message_str[:200]}. Req ID: {req_id_of_message}") # This line was already correct from a previous step.
         # If forget was initiated by a req_id that has an event
         if req_id_of_message:
             with shared_data_lock:
@@ -737,7 +738,7 @@ async def on_message_for_deriv(ws, message_str):
             if request_info:
                 request_type_str = request_info.get('type', 'unknown_candles_type_in_details')
         
-        logging.info(f"Received 'candles' data (req_id: {req_id_of_message}, type: {request_type_str}): {str(message)[:300]}...")
+        logging.info(f"Received 'candles' data (req_id: {req_id_of_message}, type: {request_type_str}): {str(message_str)[:300]}...") # This line was already correct from a previous step.
         logging.debug(f"Received {len(raw_candles_list)} raw candle objects for req_id {req_id_of_message} (type: {request_type_str}).")
 
         if request_type_str == 'ohlcv_chart_data':
@@ -814,7 +815,7 @@ async def on_message_for_deriv(ws, message_str):
             else: 
                 logging.warning(f"No candle data in 'daily_summary_data' response (req_id: {req_id_of_message}).")
         else:
-            logging.warning(f"Received 'candles' message with unexpected or untracked req_id: {req_id_of_message} (type: {request_type_str}). Message: {str(message)[:300]}")
+            logging.warning(f"Received 'candles' message with unexpected or untracked req_id: {req_id_of_message} (type: {request_type_str}). Message: {str(message_str)[:300]}") # This line was already correct from a previous step.
 
     # Handle responses for requests that use events (balance, portfolio, proposal, buy)
     elif req_id_of_message and request_details and 'event' in request_details:
@@ -947,13 +948,43 @@ async def _connect_and_listen_deriv():
 def start_deriv_ws(token=None):
     global API_TOKEN, market_data, current_tick_subscription_id, in_progress_ohlcv_candle, asyncio_loop, current_ws_task, ws_app, current_reconnect_delay
 
+    global asyncio_loop_ready_event, asyncio_loop # Ensure access to globals
+
+    if not asyncio_loop_ready_event.is_set():
+        # This condition suggests that the main initialization sequence in
+        # `if __name__ == '__main__':` (which sets this event) has not yet completed,
+        # or the asyncio loop thread hasn't signaled readiness.
+        # This call to start_deriv_ws is likely premature (e.g., Flask reloader's first pass).
+        current_frame = inspect.currentframe()
+        line_no = current_frame.f_lineno if current_frame else "unknown"
+        if asyncio_loop is None:
+            logging.warning(
+                f"start_deriv_ws called prematurely (line {line_no}) "
+                "before asyncio_loop is initialized by the main startup sequence. Ignoring this call."
+            )
+        else:
+            # Loop variable exists but not confirmed running by the event.
+            logging.warning(
+                f"start_deriv_ws called (line {line_no}) "
+                "when asyncio_loop exists but its readiness event is not yet set. Ignoring this call."
+            )
+        return # Exit for this premature call
+
+    # If asyncio_loop_ready_event IS set, then the main startup sequence intended for the loop to be ready.
+    # Perform the original critical check:
+    if asyncio_loop is None or not asyncio_loop.is_running():
+        current_frame = inspect.currentframe()
+        line_no = current_frame.f_lineno if current_frame else "unknown"
+        logging.error(
+            f"Asyncio loop (at line {line_no}) "
+            "is unexpectedly not available or not running even after its ready event was signaled. "
+            "Cannot start WebSocket."
+        )
+        return
+
     if token:
         API_TOKEN = token
         logging.info(f"API Token set for Deriv WS connection.")
-
-    if asyncio_loop is None:
-        logging.error("Asyncio loop not available. Cannot start WebSocket.")
-        return
 
     # If there's an existing WebSocket task, cancel it
     if current_ws_task and not current_ws_task.done():
@@ -963,7 +994,7 @@ def start_deriv_ws(token=None):
         # For now, let's assume cancellation is enough and new task will take over.
         # Alternatively, could `await asyncio.gather(current_ws_task, return_exceptions=True)` but from sync context.
         # For simplicity, just cancel. The old task's finally block should clean up ws_app.
-    
+
     # Reset market data and related state (as done previously)
     logging.info(f"Resetting market data and state for new/restarted WebSocket connection for SYMBOL: {SYMBOL}.")
     with market_data_lock:
