@@ -1132,7 +1132,7 @@ def market_data_ws(ws):
                             # It's crucial that last_broadcast_state is also a deepcopy if payload_copy_for_send could be further modified,
                             # or if current_full_payload (from which it was copied) could be.
                             # To be safe, make another deepcopy for last_broadcast_state.
-                            global last_broadcast_state
+                       
                             last_broadcast_state = copy.deepcopy(payload_copy_for_send) 
                             logging.info(f"Sent full data to client {ws} and updated last_broadcast_state.")
                         except Exception as send_e:
@@ -2250,7 +2250,7 @@ if __name__ == '__main__':
     ws_thread = threading.Thread(target=run_asyncio_loop_in_thread, daemon=True)
     ws_thread.start()
     
-    global last_broadcast_state # Ensure it's treated as global for initialization
+   
     # Start Deriv WebSocket connection (initial, without token if not yet provided)
     logging.info("Waiting for asyncio event loop to be ready...")
     asyncio_loop_ready_event.wait() # Wait until the event is set
