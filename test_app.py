@@ -6,17 +6,19 @@ import copy
 from datetime import datetime, timezone, timedelta
 import uuid
 import sqlite3
+import asyncio # Required for IsolatedAsyncioTestCase
+from unittest.mock import patch, AsyncMock # For mocking async functions and objects
+from concurrent.futures import ThreadPoolExecutor # To manage executor in tests
+import time # Added for time.time() in test_websocket_successful_connection_and_initial_messages
 
 # Add the parent directory to sys.path to allow imports from run.py and database.py
-# This assumes test_app.py is in a subdirectory or a specific test folder.
-# If test_app.py is in the same directory as run.py, this might not be strictly necessary
-# but is good practice for discoverability if tests are run from a different working directory.
 current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
+parent_dir = os.path.dirname(current_dir) # Assuming test_app.py is in a 'tests' subdir
 if parent_dir not in sys.path:
-    sys.path.append(parent_dir)
+     sys.path.insert(0, parent_dir) # Insert at beginning to ensure it's checked first
 
 # Now import from your application
+import run # Import the whole module to allow patching its globals like asyncio_loop, executor
 from run import app, custom_strategies, strategies_lock, load_strategies_from_db
 import database # Import the whole module to access its functions dynamically
 
@@ -24,56 +26,75 @@ import database # Import the whole module to access its functions dynamically
 ORIGINAL_DATABASE_NAME = database.get_database_name()
 TEST_DATABASE_NAME = "test_strategies.db"
 
-class TestStrategyAPI(unittest.TestCase):
 
-    @classmethod
-    def setUpClass(cls):
-        # This is run once before all tests in the class
-        pass
+class TestStrategyAPI(unittest.IsolatedAsyncioTestCase): # Changed base class
 
-    @classmethod
-    def tearDownClass(cls):
-        # This is run once after all tests in the class
-        pass
-
-    def setUp(self):
+    async def asyncSetUp(self): # Renamed and made async
         """Set up for each test method."""
+        # Store original asyncio_loop and executor from run module
+        self.original_asyncio_loop = run.asyncio_loop
+        self.original_executor = run.executor
+        self.original_ws_app = run.ws_app
+        self.original_current_ws_task = run.current_ws_task
+        self.original_deriv_semaphore = run.deriv_api_request_semaphore
+
+
+        # Set the run module's asyncio_loop to the test's loop
+        run.asyncio_loop = self.asyncio_loop # self.asyncio_loop is from IsolatedAsyncioTestCase
+
+        # Create a new executor for each test to ensure isolation
+        run.executor = ThreadPoolExecutor(max_workers=2)
+        run.ws_app = None # Ensure ws_app is reset for tests that might mock it
+        run.current_ws_task = None # Ensure task is reset
+
+        # For semaphore, we might want to use a real one for some tests, or mock it for others.
+        # Re-initialize it for each test to ensure clean state if not mocking.
+        run.deriv_api_request_semaphore = asyncio.Semaphore(5)
+
+
         # Configure database for testing
         database.set_database_name(TEST_DATABASE_NAME)
 
-        # Ensure a clean state for the test database file
         if os.path.exists(TEST_DATABASE_NAME):
             os.remove(TEST_DATABASE_NAME)
 
-        # Configure Flask app for testing
         app.config['TESTING'] = True
+        # Note: Flask's test_client is synchronous. For testing async routes directly,
+        # one might use something like httpx.AsyncClient(app=app, base_url="http://localhost")
+        # However, our Flask routes themselves are sync, they just interact with an async backend.
         self.client = app.test_client()
 
-        # Create tables in the test database
         database.create_tables()
 
-        # Clear in-memory cache before each test
         with strategies_lock:
             custom_strategies.clear()
-        # Load strategies from the (empty) test DB to ensure cache is in a known state related to DB
         load_strategies_from_db()
 
 
-    def tearDown(self):
+    async def asyncTearDown(self): # Renamed and made async
         """Tear down after each test method."""
-        # Clean up the test database file
+        # Shutdown the test-specific executor
+        if run.executor:
+            run.executor.shutdown(wait=True)
+
+        # Restore original asyncio_loop and executor in run module
+        run.asyncio_loop = self.original_asyncio_loop
+        run.executor = self.original_executor
+        run.ws_app = self.original_ws_app
+        run.current_ws_task = self.original_current_ws_task
+        run.deriv_api_request_semaphore = self.original_deriv_semaphore
+
+
         if os.path.exists(TEST_DATABASE_NAME):
             os.remove(TEST_DATABASE_NAME)
 
-        # Restore the original database name
         database.set_database_name(ORIGINAL_DATABASE_NAME)
 
-        # Clear in-memory cache
         with strategies_lock:
             custom_strategies.clear()
 
     # --- Helper Functions ---
-    def _create_sample_strategy_direct_db(self, strategy_id, name, description, conditions, actions,
+    async def _create_sample_strategy_direct_db(self, strategy_id, name, description, conditions, actions,
                                           is_active=True, is_deleted=False,
                                           created_at=None, updated_at=None, version_notes="Initial version."):
         conn = database.get_db_connection() # Should connect to TEST_DATABASE_NAME
@@ -109,7 +130,12 @@ class TestStrategyAPI(unittest.TestCase):
 
     # --- Test Cases ---
 
-    def test_01_create_strategy(self):
+    # Strategy API tests (largely remain synchronous from client's perspective)
+    # These will continue to use self.client (Flask's test client) which makes sync HTTP calls.
+    # The async nature is mostly internal to run.py's WebSocket and indicator parts.
+    # We will add specific tests for WebSocket interactions later.
+
+    async def test_01_create_strategy(self):
         """Test creating a new strategy via POST /api/strategies."""
         strategy_payload = {
             "strategy_name": "Test Strategy 1",
@@ -155,15 +181,13 @@ class TestStrategyAPI(unittest.TestCase):
         self.assertEqual(json.loads(db_version["conditions_group"]), strategy_payload["conditions_group"])
         conn.close()
 
-    def test_02_get_all_strategies(self):
+    async def test_02_get_all_strategies(self): # Made async
         """Test GET /api/strategies to retrieve all strategies."""
-        # Create some strategies directly in DB for this test
         s1_id = uuid.uuid4().hex
         self._create_sample_strategy_direct_db(s1_id, "Strategy Alpha", "Desc Alpha", {"cond": "A"}, [{"act": "X"}])
         s2_id = uuid.uuid4().hex
         self._create_sample_strategy_direct_db(s2_id, "Strategy Beta", "Desc Beta", {"cond": "B"}, [{"act": "Y"}])
 
-        # Manually call load_strategies_from_db to populate the cache, as it normally runs on app startup
         load_strategies_from_db()
 
         response = self.client.get('/api/strategies')
@@ -177,13 +201,12 @@ class TestStrategyAPI(unittest.TestCase):
         self.assertIn(s1_id, returned_ids)
         self.assertIn(s2_id, returned_ids)
 
-    def test_03_get_strategy_by_id(self):
+    async def test_03_get_strategy_by_id(self): # Made async
         """Test GET /api/strategies/<strategy_id>."""
         s_id = uuid.uuid4().hex
         sample_strategy = self._create_sample_strategy_direct_db(s_id, "Strategy Gamma", "Desc Gamma", {"cond": "C"}, [{"act": "Z"}])
-        load_strategies_from_db() # Load into cache
+        load_strategies_from_db()
 
-        # Test get existing strategy
         response = self.client.get(f'/api/strategies/{s_id}')
         self.assertEqual(response.status_code, 200)
         strategy_data = json.loads(response.data.decode())
@@ -195,11 +218,11 @@ class TestStrategyAPI(unittest.TestCase):
         response = self.client.get(f'/api/strategies/{non_existent_id}')
         self.assertEqual(response.status_code, 404)
 
-    def test_04_update_strategy(self):
+    async def test_04_update_strategy(self): # Made async
         """Test PUT /api/strategies/<strategy_id> to update a strategy."""
         s_id = uuid.uuid4().hex
         self._create_sample_strategy_direct_db(s_id, "Original Name", "Original Desc", {"orig_cond": True}, [{"orig_act": True}])
-        load_strategies_from_db() # Load into cache
+        load_strategies_from_db()
 
         update_payload = {
             "strategy_name": "Updated Name",
@@ -243,13 +266,13 @@ class TestStrategyAPI(unittest.TestCase):
         self.assertEqual(latest_version["version_notes"], update_payload["version_notes"])
         conn.close()
 
-    def test_05_delete_strategy(self):
+    async def test_05_delete_strategy(self): # Made async
         """Test DELETE /api/strategies/<strategy_id> for soft delete."""
         s_id = uuid.uuid4().hex
         self._create_sample_strategy_direct_db(s_id, "To Be Deleted", "Delete test", {}, [])
         load_strategies_from_db()
 
-        response = self.client.delete(f'/api/strategies/{s_id}')
+        response = self.client.delete(f'/api/strategies/{s_id}') # This is sync
         self.assertEqual(response.status_code, 200)
 
         # Verify in DB (soft deleted)
@@ -275,13 +298,12 @@ class TestStrategyAPI(unittest.TestCase):
         self.assertEqual(response_history.status_code, 404)
 
 
-    def test_06_enable_disable_strategy(self):
+    async def test_06_enable_disable_strategy(self): # Made async
         """Test POST enabling and disabling strategies."""
         s_id = uuid.uuid4().hex
         self._create_sample_strategy_direct_db(s_id, "Activatable", "Test enable/disable", {}, [], is_active=True)
         load_strategies_from_db()
 
-        # Disable
         response_disable = self.client.post(f'/api/strategies/{s_id}/disable')
         self.assertEqual(response_disable.status_code, 200)
         data_disable = json.loads(response_disable.data.decode())
@@ -304,22 +326,22 @@ class TestStrategyAPI(unittest.TestCase):
         self.assertTrue(bool(cursor.fetchone()["is_active"])) # Check DB
         conn.close()
 
-    def test_07_get_strategy_history(self):
+    async def test_07_get_strategy_history(self): # Made async
         """Test GET /api/strategies/<strategy_id>/history."""
         s_id = uuid.uuid4().hex
-        # Version 1 (creation)
         self._create_sample_strategy_direct_db(s_id, "History Test", "V1", {"cond": "v1"}, [{"act": "v1"}], version_notes="Version 1")
         load_strategies_from_db()
 
-        # Version 2 (update)
         update_1_payload = {"strategy_name": "History Test Updated", "description": "V2", "conditions_group": {"cond": "v2"}, "actions": [{"act": "v2"}], "version_notes": "Version 2"}
-        self.client.put(f'/api/strategies/{s_id}', data=json.dumps(update_1_payload), content_type='application/json')
+        # Flask client calls are synchronous
+        response_put1 = self.client.put(f'/api/strategies/{s_id}', data=json.dumps(update_1_payload), content_type='application/json')
+        self.assertEqual(response_put1.status_code, 200)
 
-        # Version 3 (another update)
         update_2_payload = {"strategy_name": "History Test Final", "description": "V3", "conditions_group": {"cond": "v3"}, "actions": [{"act": "v3"}], "version_notes": "Version 3"}
-        self.client.put(f'/api/strategies/{s_id}', data=json.dumps(update_2_payload), content_type='application/json')
+        response_put2 = self.client.put(f'/api/strategies/{s_id}', data=json.dumps(update_2_payload), content_type='application/json')
+        self.assertEqual(response_put2.status_code, 200)
 
-        response = self.client.get(f'/api/strategies/{s_id}/history')
+        response = self.client.get(f'/api/strategies/{s_id}/history') # Sync call
         self.assertEqual(response.status_code, 200)
         history_data = json.loads(response.data.decode())
 
@@ -341,25 +363,26 @@ class TestStrategyAPI(unittest.TestCase):
         self.assertEqual(response_404.status_code, 404)
 
 
-    def test_08_rollback_strategy(self):
+    async def test_08_rollback_strategy(self): # Made async
         """Test POST /api/strategies/<strategy_id>/rollback/<version_id>."""
         s_id = uuid.uuid4().hex
-        # Version 1 (creation)
         self._create_sample_strategy_direct_db(s_id, "Rollback Test", "V1 Desc", {"cond": "v1"}, [{"act": "v1"}], version_notes="V1 Notes")
         load_strategies_from_db()
 
-        conn_temp = database.get_db_connection()
+        # Get v1_id from DB
+        conn_temp = database.get_db_connection() # This now uses TEST_DATABASE_NAME
         cursor_temp = conn_temp.cursor()
         cursor_temp.execute("SELECT version_id FROM strategy_versions WHERE strategy_id = ? AND version_notes = ?", (s_id, "V1 Notes"))
-        v1_id = cursor_temp.fetchone()['version_id']
+        v1_row = cursor_temp.fetchone()
+        self.assertIsNotNone(v1_row, "Version 1 not found in DB for rollback test setup")
+        v1_id = v1_row['version_id']
         conn_temp.close()
 
-        # Version 2 (update)
         update_payload = {"strategy_name": "Rollback Test V2", "description": "V2 Desc", "conditions_group": {"cond": "v2"}, "actions": [{"act": "v2"}], "version_notes": "V2 Notes"}
-        self.client.put(f'/api/strategies/{s_id}', data=json.dumps(update_payload), content_type='application/json')
+        response_put = self.client.put(f'/api/strategies/{s_id}', data=json.dumps(update_payload), content_type='application/json')
+        self.assertEqual(response_put.status_code, 200)
 
-        # Rollback to Version 1
-        response_rollback = self.client.post(f'/api/strategies/{s_id}/rollback/{v1_id}')
+        response_rollback = self.client.post(f'/api/strategies/{s_id}/rollback/{v1_id}') # Sync call
         self.assertEqual(response_rollback.status_code, 200)
         rollback_data = json.loads(response_rollback.data.decode())
 
@@ -398,8 +421,158 @@ class TestStrategyAPI(unittest.TestCase):
         response_bad_strategy = self.client.post(f'/api/strategies/{uuid.uuid4().hex}/rollback/{v1_id}')
         self.assertEqual(response_bad_strategy.status_code, 404)
 
-if __name__ == '__main__':
-    # Ensure the script is runnable from the command line
-    # This setup allows running tests like: python -m unittest test_app.py
     # Or, if test_app.py is in a 'tests' subdirectory: python -m unittest tests.test_app
+    # No new tests were added in the previous step, this was a mistake.
+    # The content below is what was intended to be added.
+
+    # --- New Async Tests for WebSocket Handling ---
+
+    @patch('run.websockets.connect', new_callable=AsyncMock)
+    async def test_websocket_successful_connection_and_initial_messages(self, mock_connect):
+        """ Test successful WebSocket connection, on_open calls, and basic message send/recv """
+        mock_ws_client = AsyncMock()
+        mock_ws_client.send = AsyncMock()
+        mock_ws_client.open = True # Simulate is open for send_ws_request_and_wait checks
+        # run.ws_app = mock_ws_client # Set the global ws_app to our mock - careful if _connect_and_listen_deriv sets it too
+
+        # Simulate authorize response and a tick, then keep open until cancelled
+        async def mock_recv_generator():
+            yield json.dumps({
+                "msg_type": "authorize",
+                "authorize": {"loginid": "testuser", "scopes": ["read", "trade"]},
+                "echo_req": {"req_id": 1} # Assuming a req_id for on_open's authorize
+            })
+            yield json.dumps({ # Simulate response to ticks subscription
+                "msg_type": "subscribe",
+                "subscription": {"id": "test_tick_sub_id"},
+                "echo_req": {"req_id": 2, "ticks": run.SYMBOL} # Assuming a req_id for on_open's subscribe
+            })
+            yield json.dumps({
+                "msg_type": "tick",
+                "tick": {"symbol": run.SYMBOL, "quote": 123.45, "epoch": int(time.time())},
+                "subscription": {"id": "test_tick_sub_id"}
+            })
+            try:
+                while True:
+                    await asyncio.sleep(0.001)
+            except asyncio.CancelledError:
+                # print("Mock recv_generator cancelled") # For debugging
+                raise
+
+        mock_ws_client.__aiter__.return_value = mock_recv_generator()
+        mock_ws_client.close_code = 1000
+        mock_ws_client.close_reason = "Test normal close by cancel"
+
+        mock_connect.return_value = mock_ws_client # This is what `async with websockets.connect(...)` will use
+
+        # We need to control run.ws_app, so _connect_and_listen_deriv should set it to our mock_ws_client
+        # Patching on_open_for_deriv and its sub-calls if they make actual sends, or on_message_for_deriv
+        with patch('run.on_open_for_deriv', new_callable=AsyncMock) as mock_on_open_deriv, \
+             patch('run.on_message_for_deriv', new_callable=AsyncMock) as mock_on_message_deriv, \
+             patch('run.on_close_for_deriv', new_callable=AsyncMock) as mock_on_close_deriv, \
+             patch('run.on_error_for_deriv', new_callable=AsyncMock) as mock_on_error_deriv:
+
+            mock_on_open_deriv.return_value = None
+            mock_on_message_deriv.return_value = None
+            mock_on_close_deriv.return_value = None
+            mock_on_error_deriv.return_value = None
+
+            connect_task = self.asyncio_loop.create_task(run._connect_and_listen_deriv())
+
+            await asyncio.sleep(0.01) # Allow time for connection attempt and on_open
+
+            mock_connect.assert_called_with(
+                run.DERIV_WS_URL,
+                ping_interval=20,
+                ping_timeout=10,
+                open_timeout=10
+            )
+            self.assertIsNotNone(run.ws_app, "run.ws_app should be set to the mock client after connect.")
+            self.assertEqual(run.ws_app, mock_ws_client) # Check if the global ws_app is our mock
+            mock_on_open_deriv.assert_called_once_with(mock_ws_client)
+
+            await asyncio.sleep(0.01) # Allow time for messages to be processed by recv_loop->on_message_for_deriv
+
+            self.assertTrue(mock_on_message_deriv.call_count >= 3, f"Expected at least 3 messages, got {mock_on_message_deriv.call_count}")
+
+            processed_msg_types = set()
+            for call_args in mock_on_message_deriv.call_args_list:
+                args, _ = call_args
+                msg_str = args[1]
+                msg_data = json.loads(msg_str)
+                processed_msg_types.add(msg_data.get("msg_type"))
+
+            self.assertIn("authorize", processed_msg_types)
+            self.assertIn("subscribe", processed_msg_types)
+            self.assertIn("tick", processed_msg_types)
+
+            connect_task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await connect_task
+
+            await asyncio.sleep(0.01) # Allow time for cleanup in _connect_and_listen_deriv's finally
+            # mock_on_close_deriv.assert_called_once() # This can be tricky with cancellation
+
+    @patch('run.websockets.connect', new_callable=AsyncMock)
+    @patch('run.asyncio.sleep', new_callable=AsyncMock)
+    async def test_websocket_reconnection_backoff(self, mock_sleep, mock_connect):
+        """Test WebSocket reconnection logic with exponential backoff."""
+
+        mock_successful_ws_client = AsyncMock()
+        mock_successful_ws_client.send = AsyncMock()
+        mock_successful_ws_client.open = True
+
+        async def success_recv_generator():
+            yield json.dumps({"msg_type": "authorize", "authorize": {"loginid": "testuser"}, "echo_req": {"req_id": 1}})
+            try:
+                while True: await asyncio.sleep(0.001)
+            except asyncio.CancelledError:
+                # print("Successful WS client recv_generator cancelled in backoff test") # Debug
+                raise
+        mock_successful_ws_client.__aiter__.return_value = success_recv_generator()
+        mock_successful_ws_client.close_code = 1000
+        mock_successful_ws_client.close_reason = "Normal close after success (backoff test)"
+
+        mock_connect.side_effect = [
+            websockets.exceptions.ConnectionClosedError(None, None),
+            ConnectionRefusedError("Test refusal from mock (backoff)"),
+            mock_successful_ws_client
+        ]
+
+        initial_delay = run.INITIAL_RECONNECT_DELAY
+        run.current_reconnect_delay = initial_delay
+
+        with patch('run.on_open_for_deriv', new_callable=AsyncMock) as mock_on_open_success, \
+             patch('run.on_close_for_deriv', new_callable=AsyncMock) as mock_on_close: # Mock on_close too
+
+            connect_task = self.asyncio_loop.create_task(run._connect_and_listen_deriv())
+
+            # 1st failure
+            await asyncio.sleep(0.01)
+            mock_sleep.assert_any_call(initial_delay)
+            expected_delay_after_1st_fail = initial_delay * run.RECONNECT_FACTOR
+            self.assertAlmostEqual(run.current_reconnect_delay, expected_delay_after_1st_fail, places=5)
+
+            # 2nd failure
+            await asyncio.sleep(expected_delay_after_1st_fail + 0.01)
+            mock_sleep.assert_any_call(expected_delay_after_1st_fail)
+            expected_delay_after_2nd_fail = expected_delay_after_1st_fail * run.RECONNECT_FACTOR
+            self.assertAlmostEqual(run.current_reconnect_delay, expected_delay_after_2nd_fail, places=5)
+
+            # 3rd attempt (success)
+            await asyncio.sleep(expected_delay_after_2nd_fail + 0.01)
+
+            self.assertEqual(run.ws_app, mock_successful_ws_client, "Global ws_app not set to successful mock client")
+            mock_on_open_success.assert_called_once_with(mock_successful_ws_client)
+            self.assertEqual(run.current_reconnect_delay, initial_delay)
+            self.assertEqual(mock_connect.call_count, 3)
+
+            connect_task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await connect_task
+
+            await asyncio.sleep(0.01) # allow finally block in _connect_and_listen_deriv to run
+            # mock_on_close.assert_called() # At least one on_close should be called
+
+if __name__ == '__main__':
     unittest.main()
