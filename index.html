@@ -569,9 +569,12 @@
                 <button class="btn btn-outline" id="settingsCogBtn"> {/* Added ID here */}
                     <i class="fas fa-cog"></i> Settings
                 </button>
+                <button id="requestFullSyncBtn" class="btn btn-outline" style="display:none;"><i class="fas fa-sync-alt"></i> Full Sync</button>
             </div>
         </header>
         
+        <div id="noDataWarning" style="display:none; color: var(--warning); text-align: center; padding: 8px; background-color: rgba(245, 158, 11, 0.1); border-radius: 8px; margin-bottom: 15px; border: 1px solid var(--warning);">Warning: Data stream may be interrupted. Please check your connection or request a full sync.</div>
+
         <div id="dashboardView"> <!-- Dashboard View START -->
           <div class="dashboard">
               <div class="main-content">
@@ -812,6 +815,8 @@
         let currentSelectedSymbol = ''; // Global variable for the currently selected symbol
         let jsFrontendChartType = 'tick'; // Default chart type
         let cachedApiData = null; // To store the latest API data for redraws
+        let inactivityTimer = null; // Timer for WebSocket inactivity
+        const INACTIVITY_THRESHOLD_MS = 30000; // 30 seconds
 
         const analysisTableConfig = [
             { key: 'prices', label: 'Price', precision: 2 }, // 'key' here refers to the data field for the value
@@ -1733,7 +1738,7 @@
                     .then(data => {
                         if (data.status === 'success') {
                             setStatus(`Chart: ${data.current_chart_type}, Granularity: ${data.current_granularity_seconds}s`, 'var(--gray)');
-                            // PollMarketData will pick up new data. Optionally trigger immediate poll or clear chart.
+                            // Data will be updated by WebSocket. No need to trigger poll.
                         } else {
                             console.error('Failed to set chart settings:', data.message);
                             setStatus(`Error: ${data.message || 'Chart settings update failed.'}`, 'var(--danger)');
@@ -1780,6 +1785,7 @@
                         .then(data => {
                             if (data.status === 'success') {
                                 setStatus(`Chart: ${data.current_chart_type}, Granularity: ${data.current_granularity_seconds}s (${newTimeframe})`, 'var(--gray)');
+                                // Data will be updated by WebSocket.
                             } else {
                                 console.error('Failed to set chart settings:', data.message);
                                 setStatus(`Error: ${data.message || 'Chart settings update failed.'}`, 'var(--danger)');
@@ -1800,8 +1806,265 @@
                 setTimeframeButtonsState(false);
             }
             
-            pollMarketData(); // Start polling
+            // WebSocket connection logic
+            let marketDataSocket = null;
+            const wsUrl = `ws://${window.location.hostname}:${window.location.port || (window.location.protocol === 'https:' ? 443 : 80)}/ws/market_data`;
+            
+            function resetInactivityTimer() {
+                if (inactivityTimer) clearTimeout(inactivityTimer);
+                const noDataWarningEl = document.getElementById('noDataWarning');
+                if (noDataWarningEl) noDataWarningEl.style.display = 'none';
+                
+                // If connection status was showing the inactivity warning, reset it
+                // This check might need to be more robust depending on exact status messages
+                if (connectionStatus && connectionStatus.textContent.includes("No data stream")) {
+                    setStatus('Real-time updates connected', 'var(--success)'); 
+                }
 
+                inactivityTimer = setTimeout(() => {
+                    console.warn("No data received from WebSocket for a while. Potential connection issue.");
+                    setStatus('No data stream. Check connection.', 'var(--warning)');
+                    if (noDataWarningEl) noDataWarningEl.style.display = 'block';
+                }, INACTIVITY_THRESHOLD_MS);
+            }
+
+            console.log("Attempting to connect to WebSocket at:", wsUrl);
+
+            function connectWebSocket() {
+                if (marketDataSocket && (marketDataSocket.readyState === WebSocket.OPEN || marketDataSocket.readyState === WebSocket.CONNECTING)) {
+                    console.log("WebSocket already open or connecting.");
+                    return;
+                }
+
+                marketDataSocket = new WebSocket(wsUrl);
+
+                marketDataSocket.onopen = function(event) {
+                    console.log("WebSocket connection established.");
+                    setStatus('Real-time updates connected', 'var(--success)');
+                    const requestFullSyncBtn = document.getElementById('requestFullSyncBtn');
+                    if (requestFullSyncBtn) requestFullSyncBtn.style.display = 'inline-flex';
+                    resetInactivityTimer(); // Start inactivity timer on connection
+                };
+
+                marketDataSocket.onmessage = function(event) {
+                    resetInactivityTimer(); // Reset timer on any message
+                    try {
+                        const message = JSON.parse(event.data);
+                        console.log("Received WebSocket message, type:", message.type);
+
+                        if (message.type === "full") {
+                            cachedApiData = message.data;
+                            console.log("Full data update processed.");
+                        } else if (message.type === "delta") {
+                            if (!cachedApiData) {
+                                console.error("Delta update received, but no cachedApiData available. Requesting full sync.");
+                                if (marketDataSocket && marketDataSocket.readyState === WebSocket.OPEN) {
+                                    marketDataSocket.send(JSON.stringify({ type: "request_full_sync" }));
+                                }
+                                return; // Wait for full sync before processing further
+                            }
+                            // Apply changes
+                            if (message.changes) {
+                                for (const key in message.changes) {
+                                    cachedApiData[key] = message.changes[key];
+                                }
+                            }
+                            // Apply deletions
+                            if (message.deleted_keys) {
+                                for (const key of message.deleted_keys) {
+                                    delete cachedApiData[key];
+                                }
+                            }
+                            console.log("Delta update processed.");
+                        } else {
+                            console.warn("Unknown WebSocket message type:", message.type);
+                            return; // Do not proceed with UI updates if message type is unknown
+                        }
+                        
+                        // Common UI update logic after processing "full" or "delta"
+                        if (cachedApiData) {
+                            if (cachedApiData.current_symbol && cachedApiData.current_symbol !== currentSelectedSymbol) {
+                                console.log(`Symbol updated via WebSocket: ${cachedApiData.current_symbol}. Updating UI.`);
+                                currentSelectedSymbol = cachedApiData.current_symbol;
+                                if (currencySelector) currencySelector.value = currentSelectedSymbol;
+                                if (chartTitleElement) chartTitleElement.textContent = `Market Price - ${currentSelectedSymbol}`;
+                                if (marketOverviewSymbolElement) marketOverviewSymbolElement.textContent = `${currentSelectedSymbol} • Forex`;
+                            }
+
+                            let latestPriceForDisplay = '--';
+                            if (jsFrontendChartType === 'ohlcv' && cachedApiData.ohlcv_candles && cachedApiData.ohlcv_candles.length > 0) {
+                                latestPriceForDisplay = cachedApiData.ohlcv_candles[cachedApiData.ohlcv_candles.length - 1].close.toFixed(2);
+                            } else if (cachedApiData.prices && cachedApiData.prices.length > 0) {
+                                latestPriceForDisplay = cachedApiData.prices[cachedApiData.prices.length - 1].toFixed(2);
+                            }
+                            document.querySelector('.price-display').textContent = latestPriceForDisplay;
+                            
+                            updateCharts(cachedApiData, currentSelectedSymbol);
+                            updateAnalysisTable(cachedApiData);
+
+                            // Prediction items and market overview updates (reusing existing logic)
+                            function updatePredictionItem(indicatorName, state, trendClass) {
+                                const items = document.querySelectorAll('.prediction-card .prediction-item');
+                                items.forEach(item => {
+                                    const labelEl = item.querySelector('div:first-child');
+                                    if (labelEl && labelEl.textContent.includes(indicatorName)) {
+                                        const stateEl = item.querySelector('div:nth-child(2)');
+                                        if (stateEl) {
+                                            stateEl.textContent = state;
+                                            stateEl.className = ''; 
+                                            stateEl.classList.add('prediction-state-text');
+                                            if (trendClass) stateEl.classList.add(trendClass);
+                                            else stateEl.classList.add('prediction-state-neutral');
+                                        }
+                                    }
+                                });
+                            }
+                            function getPredictionDisplay(state) {
+                                let cssClass = 'prediction-state-neutral';
+                                if (state === 'Oversold') cssClass = 'prediction-state-oversold';
+                                else if (state === 'Overbought') cssClass = 'prediction-state-overbought';
+                                else if (state === 'Bullish') cssClass = 'prediction-state-bullish';
+                                else if (state === 'Bearish') cssClass = 'prediction-state-bearish';
+                                else if (state === 'Neutral') cssClass = 'prediction-state-neutral';
+                                return { text: state, className: cssClass };
+                            }
+                            if (cachedApiData.rsi_prediction_state !== undefined) {
+                                const rsiDisplay = getPredictionDisplay(cachedApiData.rsi_prediction_state);
+                                updatePredictionItem('RSI', rsiDisplay.text, rsiDisplay.className);
+                            }
+                            if (cachedApiData.stochastic_prediction_state !== undefined) {
+                                const stochDisplay = getPredictionDisplay(cachedApiData.stochastic_prediction_state);
+                                updatePredictionItem('Stochastic', stochDisplay.text, stochDisplay.className);
+                            }
+                            if (cachedApiData.macd_prediction_state !== undefined) {
+                                const macdDisplay = getPredictionDisplay(cachedApiData.macd_prediction_state);
+                                updatePredictionItem('MACD', macdDisplay.text, macdDisplay.className);
+                            }
+                            if (cachedApiData.cci_20_prediction_state !== undefined) {
+                                const cciDisplay = getPredictionDisplay(cachedApiData.cci_20_prediction_state);
+                                const items = document.querySelectorAll('.prediction-card .prediction-item');
+                                items.forEach(item => {
+                                    const labelEl = item.querySelector('div:first-child');
+                                    if (labelEl && labelEl.textContent.startsWith('Bollinger Bands')) { 
+                                        labelEl.textContent = 'CCI (20)'; 
+                                        updatePredictionItem('CCI (20)', cciDisplay.text, cciDisplay.className); 
+                                    }
+                                });
+                            }
+                            const high24hEl = document.querySelector('.market-overview .stats-grid .stat-card:nth-child(1) .stat-value');
+                            if (high24hEl && cachedApiData.high_24h !== undefined) high24hEl.textContent = typeof cachedApiData.high_24h === 'number' ? cachedApiData.high_24h.toFixed(2) : cachedApiData.high_24h;
+                            const low24hEl = document.querySelector('.market-overview .stats-grid .stat-card:nth-child(2) .stat-value');
+                            if (low24hEl && cachedApiData.low_24h !== undefined) low24hEl.textContent = typeof cachedApiData.low_24h === 'number' ? cachedApiData.low_24h.toFixed(2) : cachedApiData.low_24h;
+                            const volume24hEl = document.querySelector('.market-overview .stats-grid .stat-card:nth-child(3) .stat-value');
+                            if (volume24hEl && cachedApiData.volume_24h !== undefined) volume24hEl.textContent = typeof cachedApiData.volume_24h === 'number' ? cachedApiData.volume_24h.toLocaleString() : cachedApiData.volume_24h;
+                            const sentimentEl = document.querySelector('.market-overview .stats-grid .stat-card:nth-child(4) .stat-value');
+                            if (sentimentEl && cachedApiData.market_sentiment_text !== undefined) {
+                                sentimentEl.textContent = cachedApiData.market_sentiment_text;
+                                sentimentEl.classList.remove('sentiment-value-bullish', 'sentiment-value-bearish', 'sentiment-value-neutral', 'trend-up', 'trend-down');
+                                if (cachedApiData.market_sentiment_text === 'Bullish') sentimentEl.classList.add('sentiment-value-bullish');
+                                else if (cachedApiData.market_sentiment_text === 'Bearish') sentimentEl.classList.add('sentiment-value-bearish');
+                                else sentimentEl.classList.add('sentiment-value-neutral');
+                            }
+                             // Ensure status is updated correctly after processing any valid message
+                            setStatus('Real-time updates connected', 'var(--success)');
+                        }
+
+                    } catch (e) {
+                        console.error("Error processing WebSocket message:", e);
+                        setStatus('Error processing data', 'var(--danger)');
+                    }
+                };
+
+                marketDataSocket.onerror = function(event) {
+                    console.error("WebSocket error:", event);
+                    setStatus('WebSocket Error', 'var(--danger)');
+                    const requestFullSyncBtn = document.getElementById('requestFullSyncBtn');
+                    if (requestFullSyncBtn) requestFullSyncBtn.style.display = 'none';
+                    if (inactivityTimer) clearTimeout(inactivityTimer);
+                    const noDataWarningEl = document.getElementById('noDataWarning');
+                    if (noDataWarningEl) noDataWarningEl.style.display = 'none';
+                };
+
+                marketDataSocket.onclose = function(event) {
+                    console.log("WebSocket connection closed. Code:", event.code, "Reason:", event.reason, "Clean close:", event.wasClean);
+                    setStatus('Real-time updates disconnected', 'var(--gray)');
+                    const requestFullSyncBtn = document.getElementById('requestFullSyncBtn');
+                    if (requestFullSyncBtn) requestFullSyncBtn.style.display = 'none';
+                    if (inactivityTimer) clearTimeout(inactivityTimer);
+                    const noDataWarningEl = document.getElementById('noDataWarning');
+                    if (noDataWarningEl) noDataWarningEl.style.display = 'none';
+                    // Attempt to reconnect after a delay
+                    setTimeout(connectWebSocket, 5000); // Try to reconnect every 5 seconds
+                };
+            }
+            
+            connectWebSocket(); // Initial connection attempt
+
+            // Settings modal elements
+            const settingsModal = document.getElementById('settingsModal');
+            const settingsCogBtn = document.getElementById('settingsCogBtn'); 
+            const closeSettingsBtn = document.getElementById('closeSettings'); // Corrected: This is for settings modal
+            const saveSettingsBtn = document.getElementById('saveSettingsBtn'); // Corrected: This is for settings modal
+            const derivApiTokenInput = document.getElementById('derivApiToken');
+            const settingsSavedMsg = document.getElementById('settingsSavedMsg');
+
+            // Critical Settings Modal Structure Check
+            if (!settingsModal || !settingsCogBtn || !closeSettingsBtn || !saveSettingsBtn || !derivApiTokenInput || !settingsSavedMsg) {
+                console.error("[DEBUG] CRITICAL: One or more settings modal elements are missing. Settings functionality will be impaired.");
+                if(settingsCogBtn) settingsCogBtn.disabled = true; // Example of disabling trigger
+            }
+
+            // Request Full Sync Button Event Listener
+            const requestFullSyncBtn = document.getElementById('requestFullSyncBtn');
+            if (requestFullSyncBtn) {
+                requestFullSyncBtn.addEventListener('click', () => {
+                    if (marketDataSocket && marketDataSocket.readyState === WebSocket.OPEN) {
+                        console.log("Requesting full data synchronization...");
+                        marketDataSocket.send(JSON.stringify({ type: "request_full_sync" }));
+                        setStatus('Full sync requested...', 'var(--warning)');
+                    } else {
+                        console.warn("Cannot request full sync, WebSocket is not open.");
+                        alert("WebSocket is not connected. Cannot request full sync.");
+                    }
+                });
+            } else {
+                console.warn("Element with ID 'requestFullSyncBtn' not found. Listener not attached.");
+            }
+
+
+            // View Switching Elements (mostly for initial setup now)
+                        // Update price display (already part of the common UI update logic)
+                        // updateCharts, updateAnalysisTable, etc. are already part of common UI update logic
+                        
+                        // The common UI update logic is now outside the if/else if for message.type
+                        // No need to repeat it here.
+
+                    try {
+                        // Add your logic here
+                    } catch (e) { // This catch is for JSON.parse or message processing logic
+                        console.error("Error processing WebSocket message:", e);
+                        setStatus('Error processing data', 'var(--danger)');
+                    }
+                } // End of onmessage
+
+                marketDataSocket.onerror = function(event) {
+                    console.error("WebSocket error:", event);
+                    setStatus('WebSocket Error', 'var(--danger)');
+                    const requestFullSyncBtn = document.getElementById('requestFullSyncBtn');
+                    if (requestFullSyncBtn) requestFullSyncBtn.style.display = 'none';
+                };
+
+                marketDataSocket.onclose = function(event) {
+                    console.log("WebSocket connection closed. Code:", event.code, "Reason:", event.reason, "Clean close:", event.wasClean);
+                    setStatus('Real-time updates disconnected', 'var(--gray)');
+                    const requestFullSyncBtn = document.getElementById('requestFullSyncBtn');
+                    if (requestFullSyncBtn) requestFullSyncBtn.style.display = 'none';
+                    // Attempt to reconnect after a delay
+                    setTimeout(connectWebSocket, 5000); // Try to reconnect every 5 seconds
+                };
+            
+            
+            connectWebSocket(); // Initial connection attempt
 
             // Settings modal elements
             const settingsModal = document.getElementById('settingsModal');
@@ -2199,13 +2462,7 @@
 
             // --- End Globally Accessible Functions ---
 
-            try {
-                console.info("Attempting to start market data polling...");
-                pollMarketData(); // Start polling
-                console.info("Market data polling initiated.");
-            } catch (e) {
-                console.error("Error starting market data polling:", e);
-            }
+            // No longer starting polling here. WebSocket connection is initiated by connectWebSocket().
 
             try {
                 console.info("Attempting to load and display custom strategies...");
@@ -2214,7 +2471,7 @@
             } catch (e) {
                 console.error("Error calling loadAndDisplayCustomStrategies:", e);
             }
-        }});
+        });
         
         // The old, separate saveSettingsBtn listener is removed as its functionality 
         // is now part of the saveAndConnectBtn logic triggered from connectBtn flow.
