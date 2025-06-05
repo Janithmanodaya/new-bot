@@ -1,6 +1,5 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from flask_sock import Sock # Added for WebSocket
 import logging
 import numpy as np
 import pandas as pd
@@ -17,22 +16,12 @@ import sqlite3 # Added
 from database import get_db_connection, create_tables # Added
 # json is already imported
 # datetime, timezone are already imported
-import asyncio # Added for websockets
-from asyncio import Semaphore # Added for rate limiting
-import websockets # Added for websockets
-import threading # threading is already imported, ensure it's just `import threading`
-from threading import Event as ThreadingEvent # Explicitly import Event for clarity
-from concurrent.futures import ThreadPoolExecutor # Added for async indicators
-import inspect # Added for getting line numbers in logs
-import json # Ensure json is explicitly imported for ws data
-import copy # Ensure copy is explicitly imported for deepcopy for ws data
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s')
 
 app = Flask(__name__)
 CORS(app)
-sock = Sock(app) # Initialize Flask-Sock
 
 # Ensure database tables are created on application startup
 create_tables()
@@ -167,13 +156,6 @@ def save_strategy_to_db(strategy_data, is_update=False):
 # Load strategies at startup
 load_strategies_from_db()
 # --- End Strategy Management ---
-
-
-# --- WebSocket Frontend Communication Globals ---
-frontend_ws_clients = set()
-frontend_ws_clients_lock = threading.Lock()
-last_broadcast_state = {} # Stores the last full payload broadcasted, for delta computation
-# --- End WebSocket Frontend Communication Globals ---
 
 
 # Global variables for request tracking
@@ -471,84 +453,73 @@ def calculate_indicators(data_input):
     logging.debug(f"Prediction States: RSI: {results.get('rsi_prediction_state')}, Stochastic: {results.get('stochastic_prediction_state')}, MACD: {results.get('macd_prediction_state')}, CCI: {results.get('cci_20_prediction_state')}, ATR Volatility: {results.get('atr_volatility_state')}")
     return results
 
-# --- WebSocket (Deriv API) Refactored with asyncio and websockets ---
-ws_app = None # Will hold the websockets client connection object
-ws_thread = None # Thread for running the asyncio event loop
-asyncio_loop = None # The asyncio event loop
-asyncio_loop_ready_event = ThreadingEvent() # Event to signal asyncio loop is ready
-current_ws_task = None # The current asyncio.Task for connect_and_listen
-executor = ThreadPoolExecutor(max_workers=4) # Added for async indicators
-indicator_cache = {} # Added for caching indicator results
-indicator_cache_lock = threading.Lock() # Added for indicator_cache access
-deriv_api_request_semaphore = Semaphore(5) # Added for rate limiting sensitive requests
+ws_thread = None
+ws_app = None
 
-# Exponential backoff parameters for WebSocket reconnection
-INITIAL_RECONNECT_DELAY = 1.0  # seconds
-MAX_RECONNECT_DELAY = 60.0   # seconds
-RECONNECT_FACTOR = 2.0
-current_reconnect_delay = INITIAL_RECONNECT_DELAY # Tracks current delay, reset on successful connect
-
-async def request_ohlcv_data_async(ws, symbol_to_fetch, granularity_s, candle_count=100):
-    global next_req_id, pending_api_requests, shared_data_lock
-    if ws is None or not ws.open:
-        logging.warning(f"WebSocket not connected or open. Cannot request OHLCV data for {symbol_to_fetch}.")
-        return None
-    
-    with shared_data_lock:
-        current_req_id = next_req_id
-        next_req_id += 1
-        pending_api_requests[current_req_id] = {'type': 'ohlcv_chart_data'}
-    
-    request_payload = {
-        "ticks_history": symbol_to_fetch,
-        "style": "candles",
-        "granularity": int(granularity_s),
-        "end": "latest",
-        "count": int(candle_count),
-        "adjust_start_time": 1,
-        "req_id": current_req_id
-    }
-    logging.debug(f"Sending async ticks_history request for OHLCV (req_id: {current_req_id}): {json.dumps(request_payload)}")
-    await ws.send(json.dumps(request_payload))
-    return current_req_id
-
-async def request_daily_data_async(ws, symbol_to_fetch):
-    global next_req_id, pending_api_requests, shared_data_lock
-    if ws is None or not ws.open:
-        logging.warning(f"WebSocket not connected or open. Cannot request daily data for {symbol_to_fetch}.")
-        return
+def request_ohlcv_data(ws_app_instance, symbol_to_fetch, granularity_s, candle_count=100):
+    global next_req_id, pending_api_requests
+    global next_req_id, pending_api_requests, api_response_events, shared_data_lock
+    if ws_app_instance and ws_app_instance.sock and ws_app_instance.sock.connected:
+        with shared_data_lock:
+            current_req_id = next_req_id
+            next_req_id += 1
+            # No event needed here as ohlcv_chart_data updates global market_data directly
+            pending_api_requests[current_req_id] = {'type': 'ohlcv_chart_data'}
         
-    with shared_data_lock:
-        current_req_id = next_req_id
-        next_req_id += 1
-        pending_api_requests[current_req_id] = {'type': 'daily_summary_data'}
-    
-    request_payload = {
-        "ticks_history": symbol_to_fetch,
-        "style": "candles",
-        "granularity": 86400, 
-        "end": "latest",    
-        "count": 1,         
-        "req_id": current_req_id
-    }
-    logging.info(f"Requesting async daily OHLCV data (req_id: {current_req_id}) for {symbol_to_fetch}... Payload: {json.dumps(request_payload)}")
-    await ws.send(json.dumps(request_payload))
-
-async def on_open_for_deriv(ws):
-    logging.info(f"Async WebSocket connection opened. SYMBOL: {SYMBOL}, Granularity: {current_granularity_seconds}s")
-    await request_daily_data_async(ws, SYMBOL) 
-    await request_ohlcv_data_async(ws, SYMBOL, current_granularity_seconds)
-    if API_TOKEN:
-        await ws.send(json.dumps({"authorize": API_TOKEN}))
+        request_payload = {
+            "ticks_history": symbol_to_fetch,
+            "style": "candles",
+            "granularity": int(granularity_s),
+            "end": "latest",
+            "count": int(candle_count),
+            "adjust_start_time": 1, # Ensure candles align to typical market open times
+            "req_id": current_req_id # Use integer req_id
+        }
+        logging.debug(f"Sending ticks_history request for OHLCV (req_id: {current_req_id}, type: ohlcv_chart_data): {json.dumps(request_payload)}")
+        ws_app_instance.send(json.dumps(request_payload))
+        return current_req_id
     else:
-        await ws.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
+        logging.warning(f"WebSocket not connected. Cannot request OHLCV data for {symbol_to_fetch}.")
+        return None
 
-async def on_message_for_deriv(ws, message_str):
+def request_daily_data(ws_app_instance, symbol_to_fetch):
+    global next_req_id, pending_api_requests, shared_data_lock
+    if ws_app_instance and ws_app_instance.sock and ws_app_instance.sock.connected:
+        with shared_data_lock:
+            current_req_id = next_req_id
+            next_req_id += 1
+            # No event needed here as daily_summary_data updates global market_data directly
+            pending_api_requests[current_req_id] = {'type': 'daily_summary_data'}
+        
+        request_payload = {
+            "ticks_history": symbol_to_fetch,
+            "style": "candles",
+            "granularity": 86400, 
+            "end": "latest",    
+            "count": 1,         
+            "req_id": current_req_id # Use integer req_id
+        }
+        logging.info(f"Requesting daily OHLCV data (req_id: {current_req_id}, type: daily_summary_data) for {symbol_to_fetch}... Payload: {json.dumps(request_payload)}")
+        ws_app_instance.send(json.dumps(request_payload))
+    else:
+        logging.warning(f"WebSocket not connected. Cannot request daily data for {symbol_to_fetch}.")
+
+def on_open_for_deriv(ws):
+    logging.info(f"WebSocket connection opened. SYMBOL: {SYMBOL}, Granularity: {current_granularity_seconds}s")
+    request_daily_data(ws, SYMBOL) 
+    request_ohlcv_data(ws, SYMBOL, current_granularity_seconds)
+    if API_TOKEN:
+        ws.send(json.dumps({"authorize": API_TOKEN}))
+    else:
+        ws.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
+
+def on_message_for_deriv(ws, message):
+    global market_data, SYMBOL, current_tick_subscription_id, current_chart_type, current_granularity_seconds, pending_api_requests
     global market_data, SYMBOL, current_tick_subscription_id, current_chart_type, current_granularity_seconds, in_progress_ohlcv_candle
-    global pending_api_requests, api_response_events, api_response_data, shared_data_lock, market_data_lock, asyncio_loop
+    global pending_api_requests, api_response_events, api_response_data, shared_data_lock, market_data_lock
     
-    # logging.debug(f"Async Raw WS message received: {message_str[:500]}") # This line was already correct.
-    data = json.loads(message_str)
+    data = json.loads(message)
+    # logging.debug(f"Raw WS message received: {message[:500]}") # Can be too verbose
 
     req_id_of_message = data.get('echo_req', {}).get('req_id')
     request_details = None
@@ -572,22 +543,8 @@ async def on_message_for_deriv(ws, message_str):
                  if req_id_of_message in pending_api_requests:
                     pending_api_requests.pop(req_id_of_message)
         
-        logging.error(f"Deriv API Error for req_id {req_id_of_message} (type: {failed_req_type_str}): {error_details}. Full message: {message_str}") # This line was already correct from a previous step.
+        logging.error(f"Deriv API Error for req_id {req_id_of_message} (type: {failed_req_type_str}): {error_details}. Full message: {message}")
         
-        # Placeholder rate limit detection
-        is_rate_limit_error = error_details.get('code') == 'DERIV_RATE_LIMIT_STREAM_HYPOTHETICAL' or \
-                              "rate limit" in error_details.get('message', '').lower()
-
-        if is_rate_limit_error:
-            logging.warning(f"Hypothetical Deriv rate limit detected: {error_details}")
-            rate_limit_payload = {
-                "type": "system_message", 
-                "sub_type": "rate_limit", 
-                "message": "Data stream from Deriv API may be rate-limited or experiencing issues. Updates might be delayed."
-            }
-            if asyncio_loop: # Ensure loop is available
-                asyncio_loop.call_soon_threadsafe(broadcast_system_message_to_frontend, rate_limit_payload)
-
         if event_to_set: # Must be outside lock to prevent deadlock if event waiter tries to acquire lock
             event_to_set.set()
         return
@@ -632,7 +589,7 @@ async def on_message_for_deriv(ws, message_str):
             logging.info(f"Successfully subscribed to ticks. ID: {current_tick_subscription_id}. Symbol: {data.get('echo_req',{}).get('ticks')}")
     
     elif msg_type == 'forget':
-        logging.info(f"Full 'forget' response: {message_str[:200]}. Req ID: {req_id_of_message}") # This line was already correct from a previous step.
+        logging.info(f"Full 'forget' response: {message[:200]}. Req ID: {req_id_of_message}")
         # If forget was initiated by a req_id that has an event
         if req_id_of_message:
             with shared_data_lock:
@@ -711,49 +668,15 @@ async def on_message_for_deriv(ws, message_str):
                 # Use recent tick prices for indicators
                 indicator_input_data_for_calc = market_data['prices'][-max_tick_points:] # Use the capped tick prices
 
-            # Calculate indicators based on the determined input data (now asynchronously)
+            # Calculate indicators based on the determined input data
             if not indicator_input_data_for_calc:
-                logging.warning("No data (tick or ohlcv) available for async indicator calculation on new tick. Skipping.")
+                logging.warning("No data (tick or ohlcv) available for indicator calculation on new tick. Skipping.")
             else:
-                loop = asyncio.get_running_loop()
-                try:
-                    # Offload the potentially blocking calculation to the thread pool
-                    logging.debug(f"Offloading indicator calculation for {len(indicator_input_data_for_calc)} data points.")
-                    updated_data = await loop.run_in_executor(
-                        executor, # The global ThreadPoolExecutor instance
-                        calculate_indicators, # The synchronous function
-                        copy.deepcopy(indicator_input_data_for_calc) # Pass a copy to ensure thread safety of input
-                    )
-                    logging.debug("Async indicator calculation complete. Updating market data and cache.")
-
-                    # Update market_data (this part should be quick)
-                    with market_data_lock: 
-                        for key, value in updated_data.items():
-                            if key in market_data: # Ensure key exists in DEFAULT_MARKET_DATA structure
-                                if isinstance(value, list): market_data[key] = value 
-                                elif isinstance(value, str): market_data[key] = value
-                    logging.debug("Market data updated with new async indicators from tick.")
-
-                    # Update indicator_cache
-                    cache_key_symbol = SYMBOL # Assuming SYMBOL is globally current for this connection
-                    cache_key_granularity = 'tick' # For tick data
-                    cache_key = f"{cache_key_symbol}_{cache_key_granularity}"
-                    last_processed_ts = market_data['timestamps'][-1] if market_data['timestamps'] else None
-                    
-                    with indicator_cache_lock:
-                        indicator_cache[cache_key] = {
-                            'indicators': copy.deepcopy(updated_data), # Store a copy
-                            'last_processed_timestamp': last_processed_ts,
-                            'updated_at': datetime.now(timezone.utc).isoformat()
-                        }
-                    logging.debug(f"Indicator cache updated for key: {cache_key}")
-                    # Broadcast update to frontend clients
-                    if asyncio_loop: # Ensure loop is available
-                        asyncio_loop.call_soon_threadsafe(broadcast_to_frontend_clients)
-
-
-                except Exception as e:
-                    logging.error(f"Error during async indicator calculation or update from tick: {e}", exc_info=True)
+                updated_data = calculate_indicators(indicator_input_data_for_calc)
+                for key, value in updated_data.items():
+                    if key in market_data: 
+                        if isinstance(value, list): market_data[key] = value 
+                        elif isinstance(value, str): market_data[key] = value
 
     elif msg_type == 'candles':
         raw_candles_list = data.get('candles', [])
@@ -767,7 +690,7 @@ async def on_message_for_deriv(ws, message_str):
             if request_info:
                 request_type_str = request_info.get('type', 'unknown_candles_type_in_details')
         
-        logging.info(f"Received 'candles' data (req_id: {req_id_of_message}, type: {request_type_str}): {str(message_str)[:300]}...") # This line was already correct from a previous step.
+        logging.info(f"Received 'candles' data (req_id: {req_id_of_message}, type: {request_type_str}): {str(message)[:300]}...")
         logging.debug(f"Received {len(raw_candles_list)} raw candle objects for req_id {req_id_of_message} (type: {request_type_str}).")
 
         if request_type_str == 'ohlcv_chart_data':
@@ -793,43 +716,13 @@ async def on_message_for_deriv(ws, message_str):
                     logging.info(f"OHLCV data received (req_id: {req_id_of_message}, type: {request_type_str}), recalculating all indicators using these candles.")
                     # prices_for_recalc = [c['close'] for c in parsed_ohlcv_candles] # Old way
                     if parsed_ohlcv_candles: # parsed_ohlcv_candles is the list of dicts
-                        loop = asyncio.get_running_loop()
-                        try:
-                            logging.debug(f"Offloading indicator calculation for {len(parsed_ohlcv_candles)} new OHLCV candles.")
-                            # Pass a deepcopy of parsed_ohlcv_candles to ensure thread safety for the input data
-                            updated_data_from_ohlcv = await loop.run_in_executor(
-                                executor,
-                                calculate_indicators,
-                                copy.deepcopy(parsed_ohlcv_candles) 
-                            )
-                            logging.debug("Async indicator calculation for OHLCV candles complete. Updating market data and cache.")
-                            
-                            with market_data_lock: 
-                                for key, value in updated_data_from_ohlcv.items():
-                                    if key in market_data: # Ensure key exists in DEFAULT_MARKET_DATA
-                                        if isinstance(value, list): market_data[key] = value
-                                        elif isinstance(value, str): market_data[key] = value
-                            logging.info(f"Market data updated with new async indicators from OHLCV (req_id: {req_id_of_message}, type: {request_type_str}).")
-                            
-                            # Update indicator_cache for OHLCV
-                            cache_key_symbol = SYMBOL # Assuming SYMBOL is current
-                            cache_key_granularity = current_granularity_seconds # current_granularity_seconds from global
-                            cache_key = f"{cache_key_symbol}_{cache_key_granularity}"
-                            last_candle_timestamp = parsed_ohlcv_candles[-1]['time'] if parsed_ohlcv_candles else None
-
-                            with indicator_cache_lock:
-                                indicator_cache[cache_key] = {
-                                    'indicators': copy.deepcopy(updated_data_from_ohlcv),
-                                    'last_processed_timestamp': last_candle_timestamp, # Store ms timestamp
-                                    'updated_at': datetime.now(timezone.utc).isoformat()
-                                }
-                            logging.debug(f"Indicator cache updated for OHLCV key: {cache_key}")
-                            # Broadcast update to frontend clients
-                            if asyncio_loop: # Ensure loop is available
-                                asyncio_loop.call_soon_threadsafe(broadcast_to_frontend_clients)
-
-                        except Exception as e:
-                             logging.error(f"Error during async indicator calculation or update from OHLCV candles: {e}", exc_info=True)
+                        updated_data_from_ohlcv = calculate_indicators(parsed_ohlcv_candles)
+                        with market_data_lock: 
+                            for key, value in updated_data_from_ohlcv.items():
+                                if key in market_data: # Ensure key exists in DEFAULT_MARKET_DATA
+                                    if isinstance(value, list): market_data[key] = value
+                                    elif isinstance(value, str): market_data[key] = value
+                        logging.info(f"All indicators recalculated using new OHLCV data (req_id: {req_id_of_message}, type: {request_type_str}). ATR: {'Yes' if 'atr_14' in updated_data_from_ohlcv and updated_data_from_ohlcv['atr_14'] else 'No/Empty'}")
             else:
                 logging.warning(f"No candle data in 'ohlcv_chart_data' response (req_id: {req_id_of_message}).")
 
@@ -847,7 +740,7 @@ async def on_message_for_deriv(ws, message_str):
             else: 
                 logging.warning(f"No candle data in 'daily_summary_data' response (req_id: {req_id_of_message}).")
         else:
-            logging.warning(f"Received 'candles' message with unexpected or untracked req_id: {req_id_of_message} (type: {request_type_str}). Message: {str(message_str)[:300]}") # This line was already correct from a previous step.
+            logging.warning(f"Received 'candles' message with unexpected or untracked req_id: {req_id_of_message} (type: {request_type_str}). Message: {str(message)[:300]}")
 
     # Handle responses for requests that use events (balance, portfolio, proposal, buy)
     elif req_id_of_message and request_details and 'event' in request_details:
@@ -872,178 +765,49 @@ async def on_message_for_deriv(ws, message_str):
 
 def on_error_for_deriv(ws, error):
     # This handles WebSocket connection level errors, not API logical errors.
-    # API logical errors are in on_message. This handles connection level errors for the new library.
-    logging.error(f"[Async Deriv WS] Error: {error}")
-    # Potentially try to reconnect or signal closure. For now, just log.
-    # If this is called, recv_loop will likely exit.
+    # API logical errors (e.g. bad request params) are in on_message.
+    logging.error(f"[Deriv WS] Error: {error}")
 
-async def on_close_for_deriv(ws, code, reason):
-    logging.warning(f"Async WebSocket connection closed. Code: {code}, Reason: {reason}. Current SYMBOL: {SYMBOL}")
-    # Reset ws_app to None to indicate connection is closed
-    global ws_app
-    if ws_app == ws: # Ensure it's the current connection closing
-        ws_app = None
-
-async def recv_loop(ws):
-    """Continuously receive messages and handle them."""
-    try:
-        async for message_str in ws:
-            await on_message_for_deriv(ws, message_str)
-    except websockets.exceptions.ConnectionClosedOK:
-        logging.info(f"Async WebSocket connection closed OK (recv_loop).")
-        await on_close_for_deriv(ws, ws.close_code, "ConnectionClosedOK")
-    except websockets.exceptions.ConnectionClosedError as e:
-        logging.error(f"Async WebSocket connection closed with error (recv_loop): {e}")
-        await on_close_for_deriv(ws, e.code, e.reason)
-        # Consider calling on_error_for_deriv as well, or instead, depending on desired handling
-        # await on_error_for_deriv(ws, e) 
-    except Exception as e:
-        logging.exception(f"Async WebSocket unexpected error in recv_loop: {e}")
-        # This is a more general error, might need specific handling or calling on_error_for_deriv
-        await on_error_for_deriv(ws, e)
-        if ws.open: # If still open despite error, try to close gracefully
-            await ws.close(code=1011) # Internal Error
-        await on_close_for_deriv(ws, 1011, str(e))
-
-
-def run_asyncio_loop_in_thread():
-    global asyncio_loop, asyncio_loop_ready_event
-    asyncio_loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(asyncio_loop)
-    logging.info("Asyncio event loop created and set in dedicated thread.")
-    asyncio_loop_ready_event.set() # Signal that the loop is ready and set for this thread
-    
-    try:
-        asyncio_loop.run_forever()
-    finally:
-        asyncio_loop.close() # Clean up the loop when run_forever returns
-        logging.info("Asyncio event loop in dedicated thread has been closed.")
-
-
-async def _connect_and_listen_deriv():
-    """Manages the WebSocket connection lifecycle, including reconnections with exponential backoff."""
-    global ws_app, current_reconnect_delay, current_tick_subscription_id, market_data, in_progress_ohlcv_candle
-    
-    while True: # Outer loop for reconnections
-        active_connection_ws = None # Temporary ws variable for the current connection attempt
-        try:
-            logging.info(f"Attempting to connect to Deriv WebSocket: {DERIV_WS_URL} (Delay: {current_reconnect_delay:.2f}s)")
-            async with websockets.connect(
-                DERIV_WS_URL,
-                ping_interval=20,
-                ping_timeout=10,
-                open_timeout=10 # Timeout for initial connection handshake
-            ) as ws:
-                active_connection_ws = ws # Assign to temp var for this scope
-                logging.info("Successfully connected to Deriv WebSocket.")
-                current_reconnect_delay = INITIAL_RECONNECT_DELAY # Reset delay on successful connection
-                ws_app = active_connection_ws # Set global ws_app ONLY after successful connection
-                
-                await on_open_for_deriv(active_connection_ws) 
-                await recv_loop(active_connection_ws) # This will block until connection is closed
-
-        except websockets.exceptions.InvalidURI:
-            logging.error(f"Invalid Deriv WebSocket URI: {DERIV_WS_URL}. Halting reconnection attempts.")
-            ws_app = None # Ensure global ws_app is None
-            break # Critical error, stop trying to reconnect
-        except (websockets.exceptions.WebSocketException, ConnectionRefusedError, asyncio.TimeoutError) as e:
-            # Specific exceptions related to connection attempts or established connections.
-            # WebSocketException is broad and covers ConnectionClosed, ProtocolError etc.
-            # ConnectionRefusedError for when server actively refuses.
-            # asyncio.TimeoutError for open_timeout from websockets.connect.
-            logging.warning(f"WebSocket connection attempt failed or connection lost: {e} (Type: {type(e)})")
-            # Note: recv_loop calls on_close_for_deriv for established connections that drop.
-            # If the connection was never established (e.g. ConnectionRefusedError, TimeoutError on connect),
-            # on_open_for_deriv and recv_loop wouldn't have run.
-        except Exception as e: # Catch any other unexpected errors
-            logging.error(f"Unexpected error in WebSocket connect/listen loop: {e}", exc_info=True)
-        finally:
-            # This block executes after each connection attempt, whether successful then closed, or failed.
-            if ws_app == active_connection_ws: # If global ws_app was set to this connection
-                ws_app = None # Nullify global ws_app as this connection instance is now closed/failed.
-                logging.info("Global ws_app cleared due to connection closure/failure.")
-            
-            # If recv_loop was entered, it should have called on_close_for_deriv upon exit.
-            # If the connection failed before recv_loop (e.g., during websockets.connect),
-            # on_close_for_deriv for *this specific connection instance* might not be meaningful
-            # as it was never fully "opened" in our application's view.
-            # However, we always proceed to backoff and retry unless it's a critical error like InvalidURI.
-
-            logging.info(f"Waiting {current_reconnect_delay:.2f} seconds before next reconnection attempt.")
-            await asyncio.sleep(current_reconnect_delay)
-            current_reconnect_delay = min(current_reconnect_delay * RECONNECT_FACTOR, MAX_RECONNECT_DELAY)
-        # End of try-except-finally for a single connection attempt
-    # End of while True loop (reconnection loop)
-    logging.critical("_connect_and_listen_deriv loop has exited. This should only happen on critical unrecoverable errors.")
-
+def on_close_for_deriv(ws, close_status_code, close_msg):
+    logging.warning(f"WebSocket connection closed. Status: {close_status_code}, Message: {close_msg}. Current SYMBOL: {SYMBOL}")
 
 def start_deriv_ws(token=None):
-    global API_TOKEN, market_data, current_tick_subscription_id, in_progress_ohlcv_candle, asyncio_loop, current_ws_task, ws_app, current_reconnect_delay
+    global ws_thread, ws_app, API_TOKEN, market_data, current_tick_subscription_id, in_progress_ohlcv_candle
+    if token: API_TOKEN = token
     
-    global asyncio_loop_ready_event, asyncio_loop # Ensure access to globals
-
-    if not asyncio_loop_ready_event.is_set():
-        # This condition suggests that the main initialization sequence in 
-        # `if __name__ == '__main__':` (which sets this event) has not yet completed,
-        # or the asyncio loop thread hasn't signaled readiness.
-        # This call to start_deriv_ws is likely premature (e.g., Flask reloader's first pass).
-        current_frame = inspect.currentframe()
-        line_no = current_frame.f_lineno if current_frame else "unknown"
-        if asyncio_loop is None:
-            logging.warning(
-                f"start_deriv_ws called prematurely (line {line_no}) "
-                "before asyncio_loop is initialized by the main startup sequence. Ignoring this call."
-            )
-        else:
-            # Loop variable exists but not confirmed running by the event.
-            logging.warning(
-                f"start_deriv_ws called (line {line_no}) "
-                "when asyncio_loop exists but its readiness event is not yet set. Ignoring this call."
-            )
-        return # Exit for this premature call
-
-    # If asyncio_loop_ready_event IS set, then the main startup sequence intended for the loop to be ready.
-    # Perform the original critical check:
-    if asyncio_loop is None or not asyncio_loop.is_running():
-        current_frame = inspect.currentframe()
-        line_no = current_frame.f_lineno if current_frame else "unknown"
-        logging.error(
-            f"Asyncio loop (at line {line_no}) "
-            "is unexpectedly not available or not running even after its ready event was signaled. "
-            "Cannot start WebSocket."
-        )
-        return
-
-    if token: 
-        API_TOKEN = token
-        logging.info(f"API Token set for Deriv WS connection.")
-
-    # If there's an existing WebSocket task, cancel it
-    if current_ws_task and not current_ws_task.done():
-        logging.info("Existing WebSocket task found. Attempting to cancel and close connection.")
-        current_ws_task.cancel()
-        # Waiting for task cancellation can be done here if needed, but it might block.
-        # For now, let's assume cancellation is enough and new task will take over.
-        # Alternatively, could `await asyncio.gather(current_ws_task, return_exceptions=True)` but from sync context.
-        # For simplicity, just cancel. The old task's finally block should clean up ws_app.
+    if ws_app and ws_app.sock and ws_app.sock.connected:
+        logging.info("Existing WebSocket connection found. Closing it before restarting.")
+        try:
+            ws_app.keep_running = False # Signal the run_forever loop to stop
+            ws_app.close()
+            if ws_thread and ws_thread.is_alive(): ws_thread.join(timeout=5) # Wait for thread to finish
+        except Exception as e: logging.error(f"Error closing existing WebSocket: {e}")
     
-    # Reset market data and related state (as done previously)
-    logging.info(f"Resetting market data and state for new/restarted WebSocket connection for SYMBOL: {SYMBOL}.")
-    with market_data_lock:
+    logging.info(f"Starting WebSocket connection for SYMBOL: {SYMBOL}.")
+    with market_data_lock: # Ensure thread-safe access to market_data and in_progress_ohlcv_candle
         market_data.clear()
         market_data.update(copy.deepcopy(DEFAULT_MARKET_DATA))
-        in_progress_ohlcv_candle = None
-    current_tick_subscription_id = None
-    ws_app = None # Explicitly clear global ws_app before new connection attempt
+        in_progress_ohlcv_candle = None # Reset in-progress candle
+        logging.info(f"Market data and in-progress candle cleared and re-initialized for {SYMBOL}.")
+    
+    current_tick_subscription_id = None # Reset subscription ID
 
-    logging.info(f"Creating new asyncio task for Deriv WebSocket connection for SYMBOL: {SYMBOL}.")
-    # Schedule the _connect_and_listen_deriv coroutine to run on the asyncio_loop
-    current_ws_task = asyncio.run_coroutine_threadsafe(_connect_and_listen_deriv(), asyncio_loop)
-    # The current_ws_task variable now holds the Future associated with the execution of the coroutine.
-    # We don't call .result() here as _connect_and_listen_deriv is a long-running task.
+    def run_ws(): # This function runs in a separate thread
+        global ws_app
+        ws_app = websocket.WebSocketApp(
+            DERIV_WS_URL,
+            on_open=on_open_for_deriv,
+            on_message=on_message_for_deriv,
+            on_error=on_error_for_deriv,
+            on_close=on_close_for_deriv
+        )
+        ws_app.keep_running = True
+        ws_app.run_forever(ping_interval=20, ping_timeout=10)
+        logging.info("WebSocket run_forever loop has exited.")
 
-    logging.info("Deriv WebSocket connection process initiated via asyncio task.")
-
+    ws_thread = threading.Thread(target=run_ws, daemon=True)
+    ws_thread.start()
+    logging.info("WebSocket thread started.")
 
 @app.route('/api/market_data')
 def get_market_data_endpoint():
@@ -1075,241 +839,13 @@ def get_market_data_endpoint():
             current_timeframe_str = tf_str
             break
     data_to_send['current_timeframe_string'] = current_timeframe_str
-    
-    # Add current symbol to the payload
-    data_to_send['current_symbol'] = SYMBOL # Assuming SYMBOL is the correct global variable
 
-    logging.debug(f"Sending market_data with chart_type: {current_chart_type}, granularity: {current_granularity_seconds}s, timeframe_str: {current_timeframe_str}, symbol: {SYMBOL}")
+    logging.debug(f"Sending market_data with chart_type: {current_chart_type}, granularity: {current_granularity_seconds}s, timeframe_str: {current_timeframe_str}")
     return jsonify(data_to_send)
-
-
-# --- WebSocket Endpoint for Frontend ---
-@sock.route('/ws/market_data')
-def market_data_ws(ws):
-    global frontend_ws_clients, frontend_ws_clients_lock, last_broadcast_state
-    logging.info(f"Frontend WebSocket client connected: {ws}")
-    
-    with frontend_ws_clients_lock:
-        frontend_ws_clients.add(ws)
-        # Prepare and send the current full state as the initial message
-        # This ensures the new client gets the absolute latest full state.
-        # last_broadcast_state is also updated here to reflect this full send.
-        full_payload_for_new_client = get_market_data_payload_for_frontend()
-        # Update last_broadcast_state *before* sending to avoid race if a broadcast happens immediately after
-        last_broadcast_state = copy.deepcopy(full_payload_for_new_client) 
-
-    try:
-        # Send the "full" data message
-        ws.send(json.dumps({"type": "full", "data": full_payload_for_new_client}))
-        logging.debug(f"Sent initial full data snapshot to new frontend client {ws}")
-    except Exception as e:
-        logging.error(f"Error sending initial full data to client {ws}: {e}")
-        # If send fails, remove client and clean up state if necessary
-        with frontend_ws_clients_lock:
-            frontend_ws_clients.discard(ws)
-        return # End this handler for this client
-
-    try:
-        while True:
-            raw_message = ws.receive() # Blocks here until a message or disconnect
-            if raw_message is None: # Client disconnected
-                logging.info(f"Frontend WebSocket client {ws} disconnected (received None).")
-                break
-            
-            try:
-                client_message = json.loads(raw_message)
-                if isinstance(client_message, dict) and client_message.get('type') == 'request_full_sync':
-                    logging.info(f"Client {ws} requested full sync.")
-                    current_full_payload = get_market_data_payload_for_frontend()
-                    # Create a deepcopy for sending to this client and for updating global state
-                    payload_copy_for_send = copy.deepcopy(current_full_payload)
-                    
-                    # Acquire lock to send to specific client and update last_broadcast_state consistently
-                    with frontend_ws_clients_lock:
-                        try:
-                            ws.send(json.dumps({"type": "full", "data": payload_copy_for_send}))
-                            # Update the global last_broadcast_state so subsequent deltas are correct for all clients.
-                            # It's crucial that last_broadcast_state is also a deepcopy if payload_copy_for_send could be further modified,
-                            # or if current_full_payload (from which it was copied) could be.
-                            # To be safe, make another deepcopy for last_broadcast_state.
-                       
-                            last_broadcast_state = copy.deepcopy(payload_copy_for_send) 
-                            logging.info(f"Sent full data to client {ws} and updated last_broadcast_state.")
-                        except Exception as send_e:
-                            logging.error(f"Error sending full sync data to client {ws}: {send_e}. Client might be gone.")
-                            # If send fails, client might be problematic, consider removing it here or let main loop handle it.
-                            # For now, we'll let the main exception handler for the receive loop or next broadcast handle it.
-                else:
-                    logging.warning(f"Received unknown or malformed message from client {ws}: {raw_message[:200]}")
-            except json.JSONDecodeError:
-                logging.error(f"Failed to decode JSON from client {ws}: {raw_message[:200]}")
-            except Exception as e:
-                logging.error(f"Error processing message from client {ws}: {e}", exc_info=True)
-                # Depending on error, might want to break or continue. If message processing is critical, break.
-                # For now, log and continue, assuming it's a non-fatal client message issue.
-                # If the error is severe (e.g., related to ws object itself), it might be better to break.
-                # Let's break on processing errors to be safe, as client might be sending junk repeatedly.
-                break 
-
-    except ConnectionResetError:
-        logging.warning(f"Frontend WebSocket client {ws} connection reset.")
-    except websockets.exceptions.ConnectionClosed: # More general close exception for `websockets` library
-        logging.info(f"Frontend WebSocket client {ws} connection closed gracefully or unexpectedly.")
-    except Exception as e: # Catch-all for other errors in the receive loop
-        logging.error(f"Unhandled error in frontend WebSocket ({ws}) receive loop: {e}", exc_info=True)
-    finally:
-        logging.info(f"Frontend WebSocket client {ws} processing finished. Removing from active clients.")
-        with frontend_ws_clients_lock:
-            frontend_ws_clients.discard(ws)
-
-def get_market_data_payload_for_frontend():
-    """
-    Prepares the full market data payload to be sent to frontend clients.
-    This is similar to get_market_data_endpoint but returns a dict, not a Flask Response.
-    """
-    global current_chart_type, current_granularity_seconds, TIMEFRAME_TO_SECONDS, market_data, in_progress_ohlcv_candle, market_data_lock, SYMBOL
-    
-    with market_data_lock:
-        data_to_send = copy.deepcopy(market_data)
-        if current_chart_type == 'ohlcv' and in_progress_ohlcv_candle:
-            if not isinstance(data_to_send.get('ohlcv_candles'), list):
-                data_to_send['ohlcv_candles'] = []
-            data_to_send['ohlcv_candles'].append(copy.deepcopy(in_progress_ohlcv_candle))
-
-    data_to_send['current_chart_type'] = current_chart_type
-    data_to_send['current_granularity_seconds'] = current_granularity_seconds
-    current_timeframe_str = 'N/A'
-    for tf_str, tf_secs in TIMEFRAME_TO_SECONDS.items():
-        if tf_secs == current_granularity_seconds:
-            current_timeframe_str = tf_str
-            break
-    data_to_send['current_timeframe_string'] = current_timeframe_str
-    data_to_send['current_symbol'] = SYMBOL
-    return data_to_send
-
-def broadcast_to_frontend_clients():
-    """
-    Broadcasts the current market data (or delta) to all connected frontend WebSocket clients.
-    This function is intended to be called thread-safe from the asyncio loop.
-    """
-    global frontend_ws_clients, frontend_ws_clients_lock, last_broadcast_state
-    
-    current_full_payload = get_market_data_payload_for_frontend()
-    message_to_send = None
-    message_type_log = ""
-
-    with frontend_ws_clients_lock: # Protect access to last_broadcast_state and frontend_ws_clients
-        if not frontend_ws_clients: # No clients, nothing to do
-            # Still update last_broadcast_state so delta is correct for next time clients connect
-            last_broadcast_state = copy.deepcopy(current_full_payload)
-            logging.debug("No frontend clients connected. Updated last_broadcast_state for future deltas.")
-            return
-
-        if not last_broadcast_state: # If it's the very first broadcast and no client has connected yet to set it
-            logging.info("last_broadcast_state is empty (first broadcast cycle). Sending full data to all clients.")
-            message_to_send = {"type": "full", "data": current_full_payload}
-            message_type_log = "full data"
-        else:
-            changes, deleted_keys = compute_delta(last_broadcast_state, current_full_payload)
-            if changes or deleted_keys:
-                logging.debug(f"Delta computed: {len(changes)} changes, {len(deleted_keys)} deletions.")
-                message_to_send = {"type": "delta", "changes": changes, "deleted_keys": deleted_keys}
-                message_type_log = "delta"
-            else:
-                logging.debug("No changes detected. Skipping broadcast.")
-                # last_broadcast_state remains unchanged as current_full_payload is identical
-                return
-
-        # Update last_broadcast_state regardless of whether message was delta or full
-        # This must be a deepcopy because current_full_payload might be modified later or is based on market_data which changes
-        last_broadcast_state = copy.deepcopy(current_full_payload)
-        
-        if not message_to_send: # Should not happen if logic above is correct and (changes or deleted_keys) was true
-            logging.warning("Message to send is unexpectedly None after delta computation. Skipping broadcast.")
-            return
-
-        payload_json = json.dumps(message_to_send)
-        
-        clients_to_remove = set()
-        current_clients_snapshot = list(frontend_ws_clients) # Iterate over a snapshot
-
-    # Actual sending happens outside the lock on last_broadcast_state, but uses snapshot of clients
-    logging.debug(f"Broadcasting {message_type_log} to {len(current_clients_snapshot)} frontend clients.")
-    for client_ws in current_clients_snapshot:
-        try:
-            client_ws.send(payload_json)
-        except Exception as e:
-            logging.warning(f"Error sending {message_type_log} to frontend client {client_ws}: {e}. Marking for removal.")
-            clients_to_remove.add(client_ws)
-    
-    if clients_to_remove:
-        with frontend_ws_clients_lock: # Lock again to modify frontend_ws_clients
-            for client_ws in clients_to_remove:
-                frontend_ws_clients.discard(client_ws)
-            logging.info(f"Removed {len(clients_to_remove)} unresponsive frontend clients after broadcast attempt.")
-
-def compute_delta(old_state: dict, new_state: dict) -> tuple[dict, list]:
-    """
-    Computes the delta between two state dictionaries.
-    Returns a dictionary of changes and a list of deleted keys.
-    """
-    changes = {}
-    deleted_keys = []
-
-    old_keys = set(old_state.keys())
-    new_keys = set(new_state.keys())
-
-    # Check for deleted keys
-    for key in old_keys - new_keys:
-        deleted_keys.append(key)
-
-    # Check for new or changed keys
-    for key in new_keys:
-        if key not in old_keys: # New key
-            changes[key] = new_state[key]
-        elif old_state[key] != new_state[key]: # Changed key
-            # This handles lists (like timestamps, prices, ohlcv_candles, indicators) by replacing the whole list if it changed.
-            # For primitive types (strings, numbers, booleans), it compares directly.
-            changes[key] = new_state[key]
-            
-    return changes, deleted_keys
-
-def broadcast_system_message_to_frontend(system_message_payload):
-    """
-    Broadcasts a system message to all connected frontend WebSocket clients.
-    """
-    global frontend_ws_clients, frontend_ws_clients_lock
-    
-    if not frontend_ws_clients:
-        logging.debug("No frontend clients connected. Skipping system message broadcast.")
-        return
-
-    payload_json = json.dumps(system_message_payload)
-    
-    clients_to_remove = set()
-    # Create a snapshot for iteration under lock
-    with frontend_ws_clients_lock:
-        current_clients_snapshot = list(frontend_ws_clients)
-
-    logging.debug(f"Broadcasting system message to {len(current_clients_snapshot)} frontend clients: {system_message_payload.get('sub_type', 'N/A')}")
-    for client_ws in current_clients_snapshot:
-        try:
-            client_ws.send(payload_json)
-        except Exception as e:
-            logging.warning(f"Error sending system message to frontend client {client_ws}: {e}. Marking for removal.")
-            clients_to_remove.add(client_ws)
-    
-    if clients_to_remove:
-        with frontend_ws_clients_lock: # Lock again to modify the shared set
-            for client_ws in clients_to_remove:
-                frontend_ws_clients.discard(client_ws)
-            logging.info(f"Removed {len(clients_to_remove)} unresponsive frontend clients after system message broadcast attempt.")
-# --- End WebSocket Endpoint for Frontend ---
-
 
 @app.route('/api/set_chart_settings', methods=['POST'])
 def set_chart_settings_endpoint():
-    global current_chart_type, current_granularity_seconds, ws_app, SYMBOL, market_data_lock, market_data, in_progress_ohlcv_candle, indicator_cache_lock, indicator_cache
+    global current_chart_type, current_granularity_seconds, ws_app, SYMBOL, market_data_lock, market_data, in_progress_ohlcv_candle
 
     data = request.get_json()
     if not data:
@@ -1361,43 +897,17 @@ def set_chart_settings_endpoint():
                                'high_24h', 'low_24h', 'volume_24h'] and isinstance(market_data.get(key), list):
                     market_data[key].clear()
             logging.info("Cleared historical OHLCV, potentially tick data, and all indicator arrays due to settings change.")
-            
-            # Clear relevant parts of indicator_cache or the whole cache
-            with indicator_cache_lock:
-                # For simplicity, clear the whole cache. More granular clearing could be done.
-                indicator_cache.clear()
-                logging.info("Indicator cache cleared due to chart settings change.")
 
-        # Re-request data using async functions (needs to be called from sync context if ws_app.send is used directly)
-        # The current request_ohlcv_data and request_daily_data are synchronous wrappers around ws_app.send
-        # which internally use run_coroutine_threadsafe. This part needs careful review if these
-        # request functions are to be called directly here.
-        # For now, assuming these calls will trigger the async send correctly.
-        # The `start_deriv_ws` or other mechanisms usually handle data fetching on symbol/granularity change.
-        # Let's verify if these request_... functions are async or sync wrappers.
-        # They were made async def: request_ohlcv_data_async, request_daily_data_async
-        # So, they cannot be directly called from this synchronous Flask handler.
-        # This part of logic might need to be shifted to the on_open after a reconnect,
-        # or use run_coroutine_threadsafe here if immediate re-request is desired.
-        
-        # For now, let's assume that a symbol/granularity change handled by start_deriv_ws()
-        # will correctly call the async data request functions.
-        # If ws_app is connected and we change settings, we might want to trigger these.
-        # This is tricky from a sync context. The existing logic for data fetching on change
-        # might be tied to start_deriv_ws.
-        # The current `set_symbol` calls `start_deriv_ws` which handles this.
-        # `set_chart_settings_endpoint` might need to do something similar if it needs to force a data refresh
-        # beyond just clearing local data.
-        # For now, we have cleared the cache. The next data arrival will repopulate.
-        # If an immediate refresh is needed, it would require calling an async function from sync context:
-        if ws_app and ws_app.open:
+        if ws_app and ws_app.sock and ws_app.sock.connected:
             if current_chart_type == 'ohlcv':
-                logging.info(f"Requesting new historical OHLCV data (async from sync) for {SYMBOL}, Granularity={current_granularity_seconds}s.")
-                asyncio.run_coroutine_threadsafe(request_ohlcv_data_async(ws_app, SYMBOL, current_granularity_seconds), asyncio_loop)
-            asyncio.run_coroutine_threadsafe(request_daily_data_async(ws_app, SYMBOL), asyncio_loop)
+                logging.info(f"Requesting new historical OHLCV data for {SYMBOL}, Granularity={current_granularity_seconds}s.")
+                request_ohlcv_data(ws_app, SYMBOL, current_granularity_seconds)
+            # If chart type is 'tick', live ticks will start populating. Historical ticks are generally not re-fetched unless it's a symbol change.
+            # Daily summary data might also be re-requested if it's considered part of the "main" data display.
+            request_daily_data(ws_app, SYMBOL) # Refresh daily summary too
         else:
-            logging.warning("WebSocket not connected. Cannot fetch new data on settings change from set_chart_settings.")
-            
+            logging.warning("WebSocket not connected. Cannot fetch new data on settings change.")
+    
     return jsonify({
         'status': 'success',
         'current_chart_type': current_chart_type,
@@ -1425,7 +935,7 @@ def connect_get():
 
 @app.route('/api/set_symbol', methods=['POST'])
 def set_symbol():
-    global SYMBOL, market_data, ws_app, API_TOKEN, current_tick_subscription_id, current_granularity_seconds, indicator_cache, indicator_cache_lock
+    global SYMBOL, market_data, ws_app, API_TOKEN, current_tick_subscription_id, current_granularity_seconds
     data = request.get_json()
     new_symbol_value = data.get('symbol')
 
@@ -1442,21 +952,18 @@ def set_symbol():
     logging.info(f"[/api/set_symbol] Attempting to change global SYMBOL from '{SYMBOL}' to '{actual_deriv_symbol.strip()}'")
     SYMBOL = actual_deriv_symbol.strip()
 
-    if not (ws_app and ws_app.open): # Check ws_app.open for websockets library
+    if not (ws_app and ws_app.sock and ws_app.sock.connected):
         with market_data_lock:
             logging.info(f"[/api/set_symbol] WebSocket not connected. Clearing market data for new symbol {SYMBOL} locally.")
             market_data.clear()
             market_data.update(copy.deepcopy(DEFAULT_MARKET_DATA))
             logging.info(f"[/api/set_symbol] Market data cleared and re-initialized locally.")
-        with indicator_cache_lock:
-            indicator_cache.clear() # Clear indicator cache on symbol change
-            logging.info(f"[/api/set_symbol] Indicator cache cleared due to symbol change (WS not connected).")
-
-    # start_deriv_ws handles data clearing and re-requests when symbol changes and WS is active
-    logging.info(f"[/api/set_symbol] Calling start_deriv_ws for new symbol {SYMBOL}.")
-    start_deriv_ws(API_TOKEN) # This will handle stopping old task, clearing data, and starting new.
-                             # It also clears market_data and should ideally clear indicator_cache too.
-                             # Let's ensure start_deriv_ws clears indicator_cache.
+    
+    if ws_app and ws_app.sock and ws_app.sock.connected:
+        logging.info(f"[/api/set_symbol] WebSocket is connected. Restarting connection for new symbol: {SYMBOL}.")
+        start_deriv_ws(API_TOKEN) 
+    else:
+        logging.info(f"[/api/set_symbol] WebSocket not connected. New symbol {SYMBOL} will be used on next connection.")
 
     return jsonify({'status': 'symbol_updated', 'new_symbol': SYMBOL})
 
@@ -1533,98 +1040,50 @@ def check_deriv_token(token):
 
 # --- Helper function to send requests and wait for responses ---
 def send_ws_request_and_wait(payload_type: str, payload: dict, timeout_seconds=10):
-    global next_req_id, pending_api_requests, ws_app, shared_data_lock, asyncio_loop, deriv_api_request_semaphore
+    global next_req_id, pending_api_requests, ws_app, shared_data_lock
 
-    if asyncio_loop is None or not asyncio_loop.is_running():
-        logging.error("Asyncio loop is not running. Cannot send WebSocket request.")
-        return None, "Asyncio loop not available."
-
-    if ws_app is None or not ws_app.open:
-        logging.error(f"WebSocket not connected or not open. Cannot send {payload_type} request.")
+    if not (ws_app and ws_app.sock and ws_app.sock.connected):
+        logging.error(f"WebSocket not connected. Cannot send {payload_type} request.")
         return None, "WebSocket not connected."
 
-    if not API_TOKEN and payload_type not in ['authorize_check']:
-        logging.error(f"API TOKEN not set. Cannot send {payload_type} request that requires authorization.")
+    if not API_TOKEN: # Most of these requests require auth
+        logging.error(f"API TOKEN not set. Cannot send {payload_type} request.")
         return None, "API token not set."
 
-    # --- Semaphore Acquisition ---
-    logging.debug(f"Attempting to acquire Deriv API semaphore for {payload_type}...")
+    response_event = threading.Event()
+    request_entry = {'type': payload_type, 'event': response_event, 'data': None, 'error': None}
     
-    async def _acquire_semaphore_async_helper(): # Helper coroutine
-        await deriv_api_request_semaphore.acquire()
+    with shared_data_lock:
+        current_req_id = next_req_id
+        next_req_id += 1
+        payload['req_id'] = current_req_id
+        pending_api_requests[current_req_id] = request_entry
+    
+    logging.info(f"Sending {payload_type} request (req_id: {current_req_id}): {json.dumps(payload)}")
+    ws_app.send(json.dumps(payload))
 
-    acquire_future = asyncio.run_coroutine_threadsafe(_acquire_semaphore_async_helper(), asyncio_loop)
-    try:
-        acquire_future.result(timeout=timeout_seconds + 1) # Timeout slightly longer than request timeout
-        logging.debug(f"Deriv API semaphore acquired for {payload_type}.")
-    except asyncio.TimeoutError:
-        logging.warning(f"Timeout acquiring Deriv API semaphore for {payload_type}.")
-        return None, f"Timeout acquiring API semaphore for {payload_type}."
-    except Exception as e:
-        logging.error(f"Error acquiring Deriv API semaphore for {payload_type}: {e}", exc_info=True)
-        return None, f"Error acquiring API semaphore for {payload_type}: {str(e)}"
+    if response_event.wait(timeout=timeout_seconds):
+        # Event was set
+        with shared_data_lock: # Ensure atomicity of accessing and clearing the entry
+            # The entry might have been removed by on_message if error occurred there
+            # or if it was processed there. This re-check is to ensure we get the data if available.
+            final_request_details = pending_api_requests.pop(current_req_id, request_entry) 
 
-    # --- Main Request Logic (after acquiring semaphore) ---
-    try:
-        response_event = threading.Event()
-        request_entry = {'type': payload_type, 'event': response_event, 'data': None, 'error': None}
-        
-        with shared_data_lock:
-            current_req_id = next_req_id
-            next_req_id += 1
-            payload['req_id'] = current_req_id
-            pending_api_requests[current_req_id] = request_entry
-        
-        logging.info(f"Preparing to send {payload_type} request (req_id: {current_req_id}): {json.dumps(payload)}")
-
-        async def do_send(ws_connection, payload_str):
-            await ws_connection.send(payload_str)
-
-        try:
-            send_future = asyncio.run_coroutine_threadsafe(do_send(ws_app, json.dumps(payload)), asyncio_loop)
-            send_future.result(timeout=5) 
-            logging.info(f"Successfully sent {payload_type} request (req_id: {current_req_id}) to WebSocket.")
-        except Exception as e:
-            logging.exception(f"Error sending {payload_type} request (req_id: {current_req_id}) via WebSocket: {e}")
-            with shared_data_lock:
-                pending_api_requests.pop(current_req_id, None)
-            return None, f"Failed to send {payload_type} request: {str(e)}"
-
-        if response_event.wait(timeout=timeout_seconds):
-            with shared_data_lock:
-                final_request_details = pending_api_requests.pop(current_req_id, request_entry)
-            if final_request_details.get('error'):
-                logging.error(f"{payload_type} request (req_id: {current_req_id}) failed: {final_request_details['error']}")
-                return None, final_request_details['error']
-            elif final_request_details.get('data') is not None:
-                logging.info(f"{payload_type} request (req_id: {current_req_id}) successful.")
-                return final_request_details['data'], None
-            else:
-                logging.warning(f"{payload_type} request (req_id: {current_req_id}) event set but no data/error found.")
-                return None, "Response event set but no data or error recorded."
-        else: # Timeout waiting for response_event
-            logging.warning(f"{payload_type} request (req_id: {current_req_id}) timed out after {timeout_seconds}s waiting for Deriv response.")
-            with shared_data_lock:
-                pending_api_requests.pop(current_req_id, None)
-            return None, f"{payload_type} request timed out."
-
-    finally:
-        # --- Semaphore Release ---
-        # The release method of asyncio.Semaphore is thread-safe and can be called from any thread.
-        # However, it's cleaner to schedule it on the loop if it was acquired by a task on that loop.
-        # Since acquire was bridged, let's bridge release too for consistency.
-        async def _do_release_semaphore_async():
-            deriv_api_request_semaphore.release()
-            logging.debug(f"Deriv API semaphore actually released by async helper for {payload_type}.")
-        
-        if asyncio_loop and asyncio_loop.is_running():
-             asyncio.run_coroutine_threadsafe(_do_release_semaphore_async(), asyncio_loop)
-             logging.debug(f"Deriv API semaphore release scheduled for {payload_type}.")
-        else:
-            logging.error(f"Asyncio loop not running, cannot schedule semaphore release for {payload_type}. Potential semaphore leak if this occurs often.")
-            # Fallback: Try direct release if loop is gone (might raise error if loop is different from acquire)
-            # deriv_api_request_semaphore.release() # This might be problematic depending on Semaphore impl details across threads without a loop.
-            # Better to ensure loop is always running or handle this state more gracefully.
+        if final_request_details.get('error'):
+            logging.error(f"{payload_type} request (req_id: {current_req_id}) failed: {final_request_details['error']}")
+            return None, final_request_details['error']
+        elif final_request_details.get('data') is not None:
+            logging.info(f"{payload_type} request (req_id: {current_req_id}) successful.")
+            return final_request_details['data'], None
+        else: # Should not happen if event was set without error/data
+            logging.warning(f"{payload_type} request (req_id: {current_req_id}) event set but no data/error found.")
+            return None, "Response event set but no data or error recorded."
+            
+    else: # Timeout
+        logging.warning(f"{payload_type} request (req_id: {current_req_id}) timed out after {timeout_seconds}s.")
+        with shared_data_lock: # Clean up on timeout
+            pending_api_requests.pop(current_req_id, None)
+        return None, f"{payload_type} request timed out."
 
 # --- Account and Trading Endpoints ---
 @app.route('/api/account/balance', methods=['GET'])
@@ -2245,54 +1704,4 @@ if __name__ == '__main__':
     # Note: app.run(debug=True) is suitable for development.
     # For production, use a proper WSGI server like Gunicorn or Waitress.
     # load_strategies_from_db() # Already called above after app initialization
-    
-    # Start the asyncio event loop in a separate thread
-    ws_thread = threading.Thread(target=run_asyncio_loop_in_thread, daemon=True)
-    ws_thread.start()
-    
-   
-    # Start Deriv WebSocket connection (initial, without token if not yet provided)
-    logging.info("Waiting for asyncio event loop to be ready...")
-    asyncio_loop_ready_event.wait() # Wait until the event is set
-    logging.info("Asyncio event loop is ready.")
-    
-    # Initialize last_broadcast_state with a structure similar to what clients expect
-    # This ensures the first delta computation has a valid base.
-    # It's done under lock to be safe, though at startup it might not be strictly necessary.
-    with frontend_ws_clients_lock:
-        # Populate with a structure that get_market_data_payload_for_frontend would return initially.
-        # This might involve calling it, or using a deepcopy of DEFAULT_MARKET_DATA and adding other necessary keys.
-        # For simplicity, let's assume an empty dict means "send full on first real broadcast"
-        # OR, more robustly, initialize it properly here.
-        # The current get_market_data_payload_for_frontend combines market_data with other globals.
-        # Let's initialize it based on DEFAULT_MARKET_DATA and add other static parts.
-        _initial_payload_structure = copy.deepcopy(DEFAULT_MARKET_DATA)
-        _initial_payload_structure['current_chart_type'] = current_chart_type # Global default
-        _initial_payload_structure['current_granularity_seconds'] = current_granularity_seconds # Global default
-        _initial_payload_structure['current_symbol'] = SYMBOL # Global default
-        _initial_timeframe_str = 'N/A'
-        for tf_str, tf_secs in TIMEFRAME_TO_SECONDS.items():
-            if tf_secs == current_granularity_seconds:
-                _initial_timeframe_str = tf_str
-                break
-        _initial_payload_structure['current_timeframe_string'] = _initial_timeframe_str
-        last_broadcast_state = _initial_payload_structure
-        logging.info("Initialized last_broadcast_state at startup.")
-
-
-    if asyncio_loop and asyncio_loop.is_running(): # Double check, though event should ensure it
-        start_deriv_ws() 
-    else:
-        logging.error("Asyncio loop reported ready, but is not running. WebSocket cannot be initialized.")
-
-    # Use Gunicorn or another WSGI server for production instead of app.run()
-    # For development with Flask's built-in server:
-    # app.run(debug=True) will not work well with Flask-Sock if multiple workers are used by reloader.
-    # Use host='0.0.0.0' to be accessible externally, and threaded=True is often good for dev.
-    # Note: Flask's dev server is single-threaded by default. `threaded=True` or `processes=N` can be used.
-    # However, for WebSockets, a single-threaded dev server or specific config might be needed
-    # if not using an ASGI server like Daphne or Uvicorn for Flask when WebSockets are involved.
-    # Flask-Sock is designed to work with WSGI servers.
-    # For `app.run`, ensure it's okay with Flask-Sock's model.
-    # Often, `app.run(debug=True, use_reloader=False)` is safer for complex setups during dev.
-    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False) # Added use_reloader=False for stability with threads/asyncio
+    app.run(debug=True)
