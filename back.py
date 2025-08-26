@@ -87,6 +87,8 @@ CONFIG = {
     "TP2_CLOSE_PCT": 0.25,
 
     "MIN_NOTIONAL_USDT": 5.0,
+    "INTRABAR_EXECUTION_RULE": "assume_next_bar_open", # Or "assume_current_bar_close"
+    "HEDGING_ENABLED": False,
 }
 
 def setup_config(config_file="config.json"):
@@ -105,6 +107,102 @@ def setup_config(config_file="config.json"):
         with open(config_file, 'w') as f:
             json.dump(CONFIG, f, indent=4)
     return CONFIG
+
+
+# --- Exchange Info Cache & Helpers (from app.py) ---
+EXCHANGE_INFO_CACHE = {"data": None}
+
+def fetch_and_cache_exchange_info(client):
+    """
+    Fetches exchange info and caches it. This should be called once at startup.
+    """
+    global EXCHANGE_INFO_CACHE
+    try:
+        log.info("Fetching and caching exchange information...")
+        exchange_info = client.futures_exchange_info()
+        EXCHANGE_INFO_CACHE["data"] = exchange_info
+        log.info("Successfully cached exchange information.")
+    except BinanceAPIException as e:
+        log.error(f"Failed to fetch exchange info: {e}. The backtester may fail on rounding.")
+        sys.exit(1)
+
+def get_exchange_info_sync():
+    """Gets the cached exchange information."""
+    return EXCHANGE_INFO_CACHE["data"]
+
+def get_symbol_info(symbol: str) -> Optional[Dict[str, Any]]:
+    """Retrieves the cached exchange info for a specific symbol."""
+    info = get_exchange_info_sync()
+    if not info:
+        return None
+    try:
+        symbols = info.get('symbols', [])
+        return next((s for s in symbols if s.get('symbol') == symbol), None)
+    except Exception:
+        return None
+
+def round_price(symbol: str, price: float) -> float:
+    """
+    Rounds the price to the correct number of decimal places based on the
+    symbol's PRICE_FILTER tickSize.
+    """
+    try:
+        info = get_exchange_info_sync()
+        if not info or not isinstance(info, dict):
+            return float(price)
+        symbol_info = next((s for s in info.get('symbols', []) if s.get('symbol') == symbol), None)
+        if not symbol_info:
+            return float(price)
+        for f in symbol_info.get('filters', []):
+            if f.get('filterType') == 'PRICE_FILTER':
+                tick_size = Decimal(str(f.get('tickSize', '0.00000001')))
+                getcontext().prec = 28
+                p = Decimal(str(price))
+                rounded_price = p.quantize(tick_size, rounding=ROUND_DOWN)
+                return float(rounded_price)
+    except Exception:
+        log.exception("round_price failed; falling back to float")
+    return float(price)
+
+def get_max_leverage(symbol: str) -> int:
+    """Gets the max leverage for a symbol from the cached exchange info."""
+    try:
+        s = get_symbol_info(symbol)
+        if s:
+            # The 'leverages' list contains leverage brackets. We want the highest one.
+            # Example: ['125', '100', '50', '20', '10', '5', '4', '3', '2', '1']
+            if 'leverages' in s and isinstance(s['leverages'], list) and s['leverages']:
+                return int(s['leverages'][0])
+        # Fallback for older structures or if 'leverages' is not present
+        return 125
+    except Exception:
+        return 125
+
+def round_qty(symbol: str, qty: float) -> float:
+    """
+    Rounds the quantity to the correct number of decimal places based on the
+    symbol's LOT_SIZE stepSize.
+    """
+    try:
+        info = get_exchange_info_sync()
+        if not info or not isinstance(info, dict):
+            return float(qty)
+        symbol_info = next((s for s in info.get('symbols', []) if s.get('symbol') == symbol), None)
+        if not symbol_info:
+            return float(qty)
+        for f in symbol_info.get('filters', []):
+            if f.get('filterType') == 'LOT_SIZE':
+                step = Decimal(str(f.get('stepSize', '1')))
+                getcontext().prec = 28
+                q = Decimal(str(qty))
+                steps = (q // step)
+                quant = (steps * step).quantize(step, rounding=ROUND_DOWN)
+                if quant <= 0:
+                    return 0.0
+                return float(quant)
+    except Exception:
+        log.exception("round_qty failed; falling back to float")
+    return float(qty)
 
 
 # --- Indicators (copied from app.py) ---
@@ -271,11 +369,108 @@ def calculate_risk_amount(account_balance: float, config: dict) -> float:
         
     return float(risk)
 
-def round_qty(qty: float) -> float:
-    """A simplified rounding function for the backtester."""
-    # For this backtest, we'll assume a precision of 3 decimal places for most assets.
-    # A real implementation should use symbol-specific step sizes from exchange info.
-    return round(qty, 3)
+
+def calculate_trade_details(symbol: str, price: float, stop_price: float, balance: float, risk_multiplier: float, config: dict) -> Optional[Dict[str, Any]]:
+    """
+    Calculates the full trade details (qty, notional, leverage, risk) based on the app.py logic.
+    Returns a dictionary with trade details or None if the trade is invalid.
+    """
+    risk_usdt = calculate_risk_amount(balance, config) * risk_multiplier
+    if risk_usdt <= 0:
+        log.debug(f"Skipping trade for {symbol}: Risk amount is not positive ({risk_usdt})")
+        return None
+
+    price_distance = abs(price - stop_price)
+    if price_distance <= 0:
+        log.debug(f"Skipping trade for {symbol}: Price distance for SL is zero.")
+        return None
+
+    # Initial quantity calculation
+    qty = risk_usdt / price_distance
+    qty = round_qty(symbol, qty)
+    if qty <= 0:
+        log.debug(f"Skipping trade for {symbol}: Quantity rounded to zero.")
+        return None
+
+    notional = qty * price
+    min_notional = config.get("MIN_NOTIONAL_USDT", 5.0)
+
+    # Boost to meet minimum notional if necessary
+    if notional < min_notional:
+        required_qty = min_notional / price
+        new_risk = required_qty * price_distance
+        
+        # In a backtest, we assume we can always take the risk if needed to meet the minimum.
+        # A live bot might have a check here (`if new_risk > balance`).
+        risk_usdt = new_risk
+        qty = round_qty(symbol, required_qty)
+        if qty <= 0:
+            log.debug(f"Skipping trade for {symbol}: Boosted quantity rounded to zero.")
+            return None
+        notional = qty * price
+
+    # Final check after potential boosting
+    if notional < min_notional:
+        log.debug(f"Skipping trade for {symbol}: Notional value ({notional}) is still less than minimum ({min_notional}).")
+        return None
+
+    # Leverage Calculation (from app.py)
+    margin_to_use = risk_usdt
+    if balance < config["RISK_SMALL_BALANCE_THRESHOLD"]:
+        # In the live app, this is a separate config, but we can derive it for simplicity
+        margin_to_use = config.get("MARGIN_USDT_SMALL_BALANCE", 2.0)
+        
+    margin_to_use = min(margin_to_use, notional)
+    leverage = int(math.floor(notional / max(margin_to_use, 1e-9)))
+
+    # Apply safety caps on leverage
+    max_leverage_from_config = config.get("MAX_BOT_LEVERAGE", 20)
+    max_leverage_from_exchange = get_max_leverage(symbol)
+    leverage = max(1, min(leverage, max_leverage_from_config, max_leverage_from_exchange))
+
+    return {
+        "qty": qty,
+        "notional": notional,
+        "leverage": leverage,
+        "risk_usdt": risk_usdt
+    }
+
+def simulate_place_market_order_with_sl_tp(
+    symbol: str, side: str, qty: float, leverage: int,
+    entry_price: float, sl_price: float, tp_price: float,
+    timestamp: datetime, risk_usdt: float, notional: float,
+    tp1: Optional[float], tp2: Optional[float]
+) -> Dict[str, Any]:
+    """
+    Simulates the placement of a market order and returns a trade object
+    structured like the one in app.py.
+    """
+    trade_id = f"{symbol}_{int(timestamp.timestamp())}"
+    
+    # In a backtest, the order is "filled" instantly at the determined entry_price.
+    # The structure here mimics the 'meta' object from app.py.
+    trade = {
+        "id": trade_id,
+        "symbol": symbol,
+        "side": side,
+        "entry_price": entry_price,
+        "entry_time": timestamp,
+        "initial_qty": qty,
+        "qty": qty,
+        "notional": notional,
+        "leverage": leverage,
+        "sl": sl_price,
+        "tp": tp_price,
+        "risk_usdt": risk_usdt,
+        "trade_phase": 0,
+        "be_moved": False,
+        "tp1": tp1,
+        "tp2": tp2,
+        # sltp_orders would be populated in a live environment, but is less critical here
+        "sltp_orders": {"stop_order": {"status": "NEW"}, "tp_order": {"status": "NEW"}},
+    }
+    return trade
+
 
 def run_backtest(config, data_df):
     """The core backtesting engine, now with advanced trade management."""
@@ -326,13 +521,19 @@ def run_backtest(config, data_df):
     log.info("Indicator calculation complete. Starting main backtest loop...")
     
     # --- Main Loop ---
-    for timestamp, row in data_df.iterrows():
-        current_price = row['close']
+    # Use .iterrows() to get index (timestamp) and row data
+    for i, (timestamp, row) in enumerate(data_df.iterrows()):
         
         # --- Manage Open Trades ---
+        # This part checks existing trades against the current bar's data (e.g., for SL/TP hits)
+        # --- Manage Open Trades ---
+        unrealized_pnl_for_symbol = 0
         for trade in open_trades[:]:
             if trade['symbol'] != row['symbol']:
                 continue
+
+            # Update unrealized PnL for the current symbol
+            unrealized_pnl_for_symbol += (row['close'] - trade['entry_price']) * trade['qty'] if trade['side'] == 'BUY' else (trade['entry_price'] - row['close']) * trade['qty']
 
             # --- Dynamic TP & SL Management ---
             # Phase 1: TP1 Hit -> Move SL to Breakeven
@@ -340,18 +541,17 @@ def run_backtest(config, data_df):
                 hit_tp1 = (trade['side'] == 'BUY' and row['high'] >= trade['tp1']) or \
                           (trade['side'] == 'SELL' and row['low'] <= trade['tp1'])
                 if hit_tp1:
-                    qty_to_close = trade['initial_qty'] * config['TP1_CLOSE_PCT']
-                    qty_to_close = round_qty(qty_to_close)
-                    
+                    qty_to_close = round_qty(row['symbol'], trade['initial_qty'] * config['TP1_CLOSE_PCT'])
                     if qty_to_close > 0:
-                        fee = (trade['entry_price'] * qty_to_close + trade['tp1'] * qty_to_close) * config['BINANCE_FEE']
-                        pnl = (trade['tp1'] - trade['entry_price']) * qty_to_close if trade['side'] == 'BUY' else (trade['entry_price'] - trade['tp1']) * qty_to_close
+                        exit_price = trade['tp1']
+                        pnl = (exit_price - trade['entry_price']) * qty_to_close if trade['side'] == 'BUY' else (trade['entry_price'] - exit_price) * qty_to_close
+                        exit_notional = qty_to_close * exit_price
+                        fee = exit_notional * config['BINANCE_FEE']
                         capital += pnl - fee
                         
-                        closed_trades.append({'id': f"{trade['id']}_p1", 'exit_price': trade['tp1'], 'exit_time': timestamp, 'pnl': pnl - fee, 'qty': qty_to_close})
+                        closed_trades.append({'id': f"{trade['id']}_p1", 'exit_price': exit_price, 'exit_time': timestamp, 'pnl': pnl - fee, 'qty': qty_to_close})
                         
                         trade['qty'] -= qty_to_close
-                        trade['notional'] = trade['qty'] * trade['entry_price']
                         trade['sl'] = trade['entry_price']
                         trade['phase'] = 1
                         log.info(f"Trade {trade['id']} hit TP1. Closed {qty_to_close} units. Moved SL to BE.")
@@ -361,39 +561,35 @@ def run_backtest(config, data_df):
                 hit_tp2 = (trade['side'] == 'BUY' and row['high'] >= trade['tp2']) or \
                           (trade['side'] == 'SELL' and row['low'] <= trade['tp2'])
                 if hit_tp2:
-                    qty_to_close = trade['initial_qty'] * config['TP2_CLOSE_PCT']
-                    qty_to_close = round_qty(qty_to_close)
-                    
+                    qty_to_close = round_qty(row['symbol'], trade['initial_qty'] * config['TP2_CLOSE_PCT'])
                     if qty_to_close > 0:
-                        fee = (trade['entry_price'] * qty_to_close + trade['tp2'] * qty_to_close) * config['BINANCE_FEE']
-                        pnl = (trade['tp2'] - trade['entry_price']) * qty_to_close if trade['side'] == 'BUY' else (trade['entry_price'] - trade['tp2']) * qty_to_close
+                        exit_price = trade['tp2']
+                        pnl = (exit_price - trade['entry_price']) * qty_to_close if trade['side'] == 'BUY' else (trade['entry_price'] - exit_price) * qty_to_close
+                        exit_notional = qty_to_close * exit_price
+                        fee = exit_notional * config['BINANCE_FEE']
                         capital += pnl - fee
                         
-                        closed_trades.append({'id': f"{trade['id']}_p2", 'exit_price': trade['tp2'], 'exit_time': timestamp, 'pnl': pnl - fee, 'qty': qty_to_close})
+                        closed_trades.append({'id': f"{trade['id']}_p2", 'exit_price': exit_price, 'exit_time': timestamp, 'pnl': pnl - fee, 'qty': qty_to_close})
                         
                         trade['qty'] -= qty_to_close
-                        trade['notional'] = trade['qty'] * trade['entry_price']
                         trade['sl'] = trade['tp1']
                         trade['phase'] = 2
                         log.info(f"Trade {trade['id']} hit TP2. Closed {qty_to_close} units. Moved SL to TP1.")
 
-            # --- Final SL/TP check ---
+            # --- Final SL/TP check for the remaining position ---
             closed = False
-            pnl = 0
+            exit_price = 0
             if trade['side'] == 'BUY':
-                if row['low'] <= trade['sl']:
-                    closed = True; exit_price = trade['sl']
-                elif row['high'] >= trade['tp']:
-                    closed = True; exit_price = trade['tp']
+                if row['low'] <= trade['sl']: closed = True; exit_price = trade['sl']
+                elif row['high'] >= trade['tp']: closed = True; exit_price = trade['tp']
             elif trade['side'] == 'SELL':
-                if row['high'] >= trade['sl']:
-                    closed = True; exit_price = trade['sl']
-                elif row['low'] <= trade['tp']:
-                    closed = True; exit_price = trade['tp']
+                if row['high'] >= trade['sl']: closed = True; exit_price = trade['sl']
+                elif row['low'] <= trade['tp']: closed = True; exit_price = trade['tp']
 
             if closed:
-                fee = (trade['notional'] + (trade['qty'] * exit_price)) * config['BINANCE_FEE']
                 pnl = (exit_price - trade['entry_price']) * trade['qty'] if trade['side'] == 'BUY' else (trade['entry_price'] - exit_price) * trade['qty']
+                exit_notional = trade['qty'] * exit_price
+                fee = exit_notional * config['BINANCE_FEE']
                 capital += pnl - fee
                 
                 closed_trades.append({'id': f"{trade['id']}_final", 'exit_price': exit_price, 'exit_time': timestamp, 'pnl': pnl - fee, 'qty': trade['qty']})
@@ -402,8 +598,12 @@ def run_backtest(config, data_df):
                 continue
         
         # --- Check for New Entries ---
-        if any(t['symbol'] == row['symbol'] for t in open_trades): continue
-        if row['symbol'] in last_trade_close_time and (timestamp - last_trade_close_time[row['symbol']]) / pd.Timedelta(config['TIMEFRAME']) < config["MIN_CANDLES_AFTER_CLOSE"]: continue
+        existing_trade_for_symbol = next((t for t in open_trades if t['symbol'] == row['symbol']), None)
+        if not config.get("HEDGING_ENABLED", False) and existing_trade_for_symbol:
+            continue
+        
+        if row['symbol'] in last_trade_close_time and (timestamp - last_trade_close_time[row['symbol']]) / pd.Timedelta(config['TIMEFRAME']) < config["MIN_CANDLES_AFTER_CLOSE"]:
+            continue
         
         kama_now, kama_prev, prev_close = row['kama'], row['prev_kama'], row['prev_close']
         if pd.isna(kama_prev) or pd.isna(prev_close): continue
@@ -414,49 +614,65 @@ def run_backtest(config, data_df):
         if trend_small != trend_big: continue
         if not (row['adx'] >= config["ADX_THRESHOLD"] and row['chop'] < config["CHOP_THRESHOLD"] and row['bbw'] < config["BBWIDTH_THRESHOLD"]): continue
         
-        crossed_above = (prev_close <= kama_prev) and (current_price > kama_now)
-        crossed_below = (prev_close >= kama_prev) and (current_price < kama_now)
+        crossed_above = (prev_close <= kama_prev) and (row['close'] > kama_now)
+        crossed_below = (prev_close >= kama_prev) and (row['close'] < kama_now)
         
         side = None
         if crossed_above and trend_small == 'bull': side = 'BUY'
         elif crossed_below and trend_small == 'bear': side = 'SELL'
         
         if side:
+            # --- Get Entry Price based on Execution Rule ---
+            if i + 1 >= len(data_df): continue # Cannot enter on the last bar
+            next_bar = data_df.iloc[i+1]
+            if next_bar['symbol'] != row['symbol']: continue # Ensure next bar is the same symbol in a multi-asset df
+
+            entry_price = next_bar['open']
+            entry_timestamp = next_bar.name # This is the index (timestamp) of the next bar
+            
+            # --- Calculate SL/TP based on the signal bar's data ---
             risk_multiplier = 1.0
             if config["VOLATILITY_ADJUST_ENABLED"]:
                 if row['adx'] > config["TRENDING_ADX"] and row['chop'] < config["TRENDING_CHOP"]: risk_multiplier = config["TRENDING_RISK_MULT"]
                 elif row['adx'] < config["CHOPPY_ADX"] or row['chop'] > config["CHOPPY_CHOP"]: risk_multiplier = config["CHOPPY_RISK_MULT"]
             
-            risk_usdt = calculate_risk_amount(capital, config) * risk_multiplier
             sl_distance = config["SL_TP_ATR_MULT"] * row['atr']
             if sl_distance <= 0: continue
             
-            stop_price = current_price - sl_distance if side == 'BUY' else current_price + sl_distance
-            price_distance = abs(current_price - stop_price)
-            if price_distance <= 0: continue
+            stop_price = entry_price - sl_distance if side == 'BUY' else entry_price + sl_distance
             
-            qty = round_qty(risk_usdt / price_distance)
-            notional = qty * current_price
-            if notional < config["MIN_NOTIONAL_USDT"]: continue
-            
-            capital -= (notional * config["BINANCE_FEE"])
-            trade_id_counter += 1
-            
-            tp1, tp2, tp3 = None, None, None
-            final_tp = current_price + sl_distance if side == 'BUY' else current_price - sl_distance
-            if config["DYN_SLTP_ENABLED"]:
-                tp1 = current_price + (config["TP1_ATR_MULT"] * row['atr']) if side == 'BUY' else current_price - (config["TP1_ATR_MULT"] * row['atr'])
-                tp2 = current_price + (config["TP2_ATR_MULT"] * row['atr']) if side == 'BUY' else current_price - (config["TP2_ATR_MULT"] * row['atr'])
-                final_tp = current_price + (config["TP3_ATR_MULT"] * row['atr']) if side == 'BUY' else current_price - (config["TP3_ATR_MULT"] * row['atr'])
+            # --- Sizing & Leverage ---
+            trade_details = calculate_trade_details(
+                symbol=row['symbol'], price=entry_price, stop_price=stop_price,
+                balance=capital, risk_multiplier=risk_multiplier, config=config
+            )
+            if not trade_details: continue
 
-            open_trades.append({
-                'id': trade_id_counter, 'symbol': row['symbol'], 'side': side, 'entry_price': current_price,
-                'entry_time': timestamp, 'qty': qty, 'initial_qty': qty, 'notional': notional,
-                'sl': stop_price, 'tp': final_tp, 'risk_usdt': risk_usdt,
-                'phase': 0, 'be_moved': False, 'tp1': tp1, 'tp2': tp2
-            })
+            # --- Dynamic TP Calculation ---
+            tp1, tp2 = None, None
+            final_tp = entry_price + sl_distance if side == 'BUY' else entry_price - sl_distance
+            if config["DYN_SLTP_ENABLED"]:
+                tp1 = entry_price + (config["TP1_ATR_MULT"] * row['atr']) if side == 'BUY' else entry_price - (config["TP1_ATR_MULT"] * row['atr'])
+                tp2 = entry_price + (config["TP2_ATR_MULT"] * row['atr']) if side == 'BUY' else entry_price - (config["TP2_ATR_MULT"] * row['atr'])
+                final_tp = entry_price + (config["TP3_ATR_MULT"] * row['atr']) if side == 'BUY' else entry_price - (config["TP3_ATR_MULT"] * row['atr'])
+
+            # --- Simulate Order Placement ---
+            new_trade = simulate_place_market_order_with_sl_tp(
+                symbol=row['symbol'], side=side, qty=trade_details['qty'], leverage=trade_details['leverage'],
+                entry_price=entry_price, sl_price=stop_price, tp_price=final_tp,
+                timestamp=entry_timestamp, risk_usdt=trade_details['risk_usdt'], notional=trade_details['notional'],
+                tp1=tp1, tp2=tp2
+            )
+            open_trades.append(new_trade)
+            capital -= (trade_details['notional'] * config["BINANCE_FEE"]) # Fee on entry
             
-        unrealized_pnl = sum((current_price - t['entry_price']) * t['qty'] if t['side'] == 'BUY' else (t['entry_price'] - current_price) * t['qty'] for t in open_trades)
+        # --- Update Equity Curve ---
+        # Calculate unrealized PnL based on the close of the current bar
+        unrealized_pnl = sum(
+            (row['close'] - t['entry_price']) * t['qty'] if t['side'] == 'BUY'
+            else (t['entry_price'] - row['close']) * t['qty']
+            for t in open_trades if t['symbol'] == row['symbol']
+        )
         equity_curve.append(capital + unrealized_pnl)
 
     log.info("Backtest loop finished.")
@@ -819,6 +1035,7 @@ if __name__ == '__main__':
         log.info("Historical data file not found.")
         client = init_binance_client()
         historical_df = download_historical_data(client, CONFIG, DATA_FILE)
+        fetch_and_cache_exchange_info(client)
 
     # --- Mode Selection ---
     while True:
