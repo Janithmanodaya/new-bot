@@ -510,65 +510,126 @@ def generate_html_report(results, config, filename="backtest_report.html"):
     avg_loss = abs(losing_trades_df['pnl'].mean()) if not losing_trades_df.empty else 0
     risk_reward_ratio = avg_win / avg_loss if avg_loss > 0 else float('inf')
 
-    # --- Drawdown Calculation ---
-    equity_curve = pd.Series(results['equity_curve'])
+    # --- Corrected Drawdown Calculation ---
+    equity_curve = pd.Series(results['equity_curve'], dtype=np.float64)
+    if equity_curve.empty or equity_curve.iloc[0] != initial_capital:
+        equity_curve = pd.concat([pd.Series([initial_capital]), equity_curve], ignore_index=True)
+    
     running_max = equity_curve.cummax()
-    drawdown = (running_max - equity_curve) / running_max
-    max_drawdown_pct = drawdown.max() * 100
+    # Avoid division by zero. Replace 0 with NaN and then fill with 0.
+    drawdown = (running_max - equity_curve) / running_max.replace(0, np.nan)
+    drawdown[equity_curve < 0] = 1.0 # If equity is negative, drawdown is 100%
+    drawdown.fillna(0, inplace=True)
+    max_drawdown_pct = drawdown.max() * 100 if not drawdown.empty else 0
+    
+    # Find drawdown period for chart annotation
+    max_dd_end_idx = drawdown.idxmax() if not drawdown.empty else -1
+    max_dd_start_idx = -1
+    if max_dd_end_idx > 0:
+        try:
+            relevant_equity = equity_curve.iloc[:max_dd_end_idx + 1]
+            peak_value = relevant_equity.cummax().iloc[-1]
+            max_dd_start_idx = relevant_equity[relevant_equity >= peak_value].index[-1]
+        except (IndexError, KeyError):
+            max_dd_start_idx = 0 # Fallback
 
-    # --- Plotly Charts ---
+    # --- Plotly Charts (with Dark Theme and Enhancements) ---
+    template = 'plotly_dark'
+    
+    # Adaptive Equity Chart
     equity_fig = go.Figure()
-    equity_fig.add_trace(go.Scatter(x=equity_curve.index, y=equity_curve, mode='lines', name='Equity'))
-    equity_fig.update_layout(title='Equity Curve', xaxis_title='Time', yaxis_title='Equity (USDT)')
+    equity_fig.add_trace(go.Scatter(
+        x=np.arange(len(equity_curve)), 
+        y=equity_curve, 
+        mode='lines', 
+        name='Account Balance', 
+        line=dict(color='#17becf', width=2)
+    ))
+    if max_dd_start_idx != -1 and max_dd_end_idx != -1 and (max_dd_end_idx > max_dd_start_idx):
+        equity_fig.add_vrect(
+            x0=max_dd_start_idx, x1=max_dd_end_idx,
+            fillcolor="rgba(239, 83, 80, 0.2)", line_width=0,
+            annotation_text=f"Max Drawdown: {max_drawdown_pct:.2f}%", 
+            annotation_position="top left",
+            annotation=dict(font=dict(color='white'))
+        )
+    equity_fig.update_layout(
+        title_text='<b>Account Balance Over Time</b>',
+        xaxis_title='Trade/Event Number',
+        yaxis_title='Account Balance (USDT)',
+        template=template,
+        height=500,
+        legend=dict(x=0.01, y=0.99, bordercolor='rgba(255,255,255,0.2)', borderwidth=1)
+    )
 
-    drawdown_fig = go.Figure()
-    drawdown_fig.add_trace(go.Scatter(x=drawdown.index, y=drawdown * -100, mode='lines', name='Drawdown', fill='tozeroy', line_color='red'))
-    drawdown_fig.update_layout(title='Drawdown Curve', xaxis_title='Time', yaxis_title='Drawdown (%)')
-
+    # Monthly PnL Chart
     monthly_pnl = trades_df.set_index('exit_time')['pnl'].resample('M').sum()
-    monthly_fig = go.Figure(data=[go.Bar(x=monthly_pnl.index.strftime('%Y-%m'), y=monthly_pnl, name='Monthly PnL')])
-    monthly_fig.update_layout(title='Monthly PnL', xaxis_title='Month', yaxis_title='PnL (USDT)')
+    monthly_fig = go.Figure(data=[go.Bar(
+        x=monthly_pnl.index.strftime('%Y-%m'), 
+        y=monthly_pnl, 
+        name='Monthly PnL',
+        marker_color=['#28a745' if p > 0 else '#dc3545' for p in monthly_pnl]
+    )])
+    monthly_fig.update_layout(
+        title_text='<b>Monthly Profit & Loss</b>',
+        xaxis_title='Month', 
+        yaxis_title='Total PnL (USDT)',
+        template=template
+    )
     
     # --- HTML Tables for Trades ---
     display_cols = ['id', 'exit_time', 'exit_price', 'pnl', 'qty']
-    
-    # Format for display
-    winning_trades_df['pnl_display'] = winning_trades_df['pnl'].map('${:,.2f}'.format)
-    losing_trades_df['pnl_display'] = losing_trades_df['pnl'].map('${:,.2f}'.format)
-    
+    winning_trades_df['pnl'] = winning_trades_df['pnl'].round(2)
+    losing_trades_df['pnl'] = losing_trades_df['pnl'].round(2)
     win_table_html = winning_trades_df[display_cols].to_html(classes='trade-table', index=False)
     loss_table_html = losing_trades_df[display_cols].to_html(classes='trade-table', index=False)
 
     # --- HTML Assembly ---
     equity_chart_html = equity_fig.to_html(full_html=False, include_plotlyjs='cdn')
-    drawdown_chart_html = drawdown_fig.to_html(full_html=False, include_plotlyjs=False)
     monthly_chart_html = monthly_fig.to_html(full_html=False, include_plotlyjs=False)
+
+    # Create parameters table
+    params_html = "<h3>Parameters Used</h3><table class='trade-table'>"
+    for key, value in config.items():
+        params_html += f"<tr><td>{key}</td><td>{value}</td></tr>"
+    params_html += "</table>"
 
     html_template = f"""
     <html>
     <head>
         <title>Backtest Report</title>
         <style>
-            body {{ font-family: Arial, sans-serif; margin: 40px; background-color: #f0f2f5; }}
-            h1, h2, h3 {{ color: #333; text-align: center; }}
-            .container {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 40px; }}
-            .kpi-box {{ background-color: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 20px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-            .kpi-title {{ font-weight: bold; font-size: 1em; color: #666; }}
-            .kpi-value {{ font-size: 1.8em; font-weight: bold; margin-top: 10px; }}
-            .positive {{ color: #28a745; }}
-            .negative {{ color: #dc3545; }}
-            .chart-container {{ background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }}
-            .table-container {{ background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }}
+            :root {{
+                --bg-color: #1e1e1e; --primary-text: #d4d4d4; --secondary-text: #8c8c8c;
+                --card-bg: #2a2a2a; --border-color: #444; --positive: #28a745; --negative: #dc3545;
+                --link-color: #3794ff;
+            }}
+            body {{ 
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                margin: 0; padding: 20px; background-color: var(--bg-color); color: var(--primary-text);
+            }}
+            h1, h2, h3 {{ text-align: center; color: var(--primary-text); font-weight: 300; }}
+            h1 {{ font-size: 2.5em; }}
+            h2 {{ font-size: 1.8em; margin-top: 40px; border-bottom: 1px solid var(--border-color); padding-bottom: 10px; }}
+            h3 {{ font-size: 1.4em; text-align: left; margin-top: 30px; margin-bottom: 15px; }}
+            .kpi-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin-bottom: 30px; }}
+            .kpi-box {{ background-color: var(--card-bg); border: 1px solid var(--border-color); border-radius: 8px; padding: 15px; text-align: center; }}
+            .kpi-title {{ font-weight: 500; font-size: 0.9em; color: var(--secondary-text); margin-bottom: 8px; }}
+            .kpi-value {{ font-size: 1.6em; font-weight: 700; }}
+            .positive {{ color: var(--positive); }}
+            .negative {{ color: var(--negative); }}
+            .chart-container {{ background-color: var(--card-bg); padding: 20px; border-radius: 8px; border: 1px solid var(--border-color); margin-bottom: 20px; }}
+            .table-container {{ background-color: var(--card-bg); border-radius: 8px; border: 1px solid var(--border-color); margin-bottom: 20px; overflow-x: auto; padding: 15px; }}
             .trade-table {{ width: 100%; border-collapse: collapse; }}
-            .trade-table th, .trade-table td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-            .trade-table th {{ background-color: #f2f2f2; }}
-            .trade-table tr:nth-child(even) {{ background-color: #f9f9f9; }}
+            .trade-table th, .trade-table td {{ border-bottom: 1px solid var(--border-color); padding: 12px 15px; text-align: left; }}
+            .trade-table th {{ background-color: #333; font-weight: 600; }}
+            .trade-table tr:hover {{ background-color: #3c3c3c; }}
         </style>
     </head>
     <body>
         <h1>Strategy Backtest Report</h1>
         <h2>Key Performance Indicators</h2>
-        <div class="container">
+        <div class="kpi-grid">
             <div class="kpi-box">
                 <div class="kpi-title">Total Return</div>
                 <div class="kpi-value {'positive' if total_return_pct >= 0 else 'negative'}">{total_return_pct:.2f}%</div>
@@ -582,35 +643,39 @@ def generate_html_report(results, config, filename="backtest_report.html"):
                 <div class="kpi-value negative">{max_drawdown_pct:.2f}%</div>
             </div>
             <div class="kpi-box">
-                <div class="kpi-title">Win / Loss Count</div>
-                <div class="kpi-value"><span class="positive">{win_count}</span> / <span class="negative">{loss_count}</span></div>
-            </div>
-            <div class="kpi-box">
                 <div class="kpi-title">Win Rate</div>
-                <div class="kpi-value">{win_rate:.2f}%</div>
+                <div class="kpi-value {'positive' if win_rate > 50 else 'negative'}">{win_rate:.2f}%</div>
             </div>
             <div class="kpi-box">
                 <div class="kpi-title">Profit Factor</div>
-                <div class="kpi-value">{profit_factor:.2f}</div>
+                <div class="kpi-value {'positive' if profit_factor > 1 else 'negative'}">{profit_factor:.2f}</div>
+            </div>
+            <div class="kpi-box">
+                <div class="kpi-title">Avg Win / Loss</div>
+                <div class="kpi-value {'positive' if risk_reward_ratio > 1 else 'negative'}">{risk_reward_ratio:.2f}</div>
             </div>
              <div class="kpi-box">
-                <div class="kpi-title">Avg. Win / Avg. Loss</div>
-                <div class="kpi-value">{risk_reward_ratio:.2f}</div>
+                <div class="kpi-title">Total Trades</div>
+                <div class="kpi-value">{total_trades}</div>
             </div>
         </div>
 
         <h2>Charts</h2>
         <div class="chart-container">{equity_chart_html}</div>
-        <div class="chart-container">{drawdown_chart_html}</div>
         <div class="chart-container">{monthly_chart_html}</div>
+
+        <h2>Configuration</h2>
+        <div class="table-container">
+            {params_html}
+        </div>
 
         <h2>Trade History</h2>
         <div class="table-container">
-            <h3>Winning Trades</h3>
+            <h3>Winning Trades ({win_count})</h3>
             {win_table_html}
         </div>
         <div class="table-container">
-            <h3>Losing Trades</h3>
+            <h3>Losing Trades ({loss_count})</h3>
             {loss_table_html}
         </div>
     </body>
@@ -631,7 +696,8 @@ def run_manual_mode(config, historical_df):
     backtest_results = run_backtest(config, historical_df)
 
     # Generate the final report
-    generate_html_report(backtest_results, config, "manual_backtest_report.html")
+    if backtest_results:
+        generate_html_report(backtest_results, config, "manual_backtest_report.html")
 
 
 def run_auto_mode(base_config, historical_df):
@@ -714,8 +780,9 @@ def run_auto_mode(base_config, historical_df):
         final_run_config = result['config']
         final_run_results = run_backtest(final_run_config, historical_df.copy())
         
-        report_filename = f"optimization_report_rank_{rank}.html"
-        generate_html_report(final_run_results, final_run_config, report_filename)
+        if final_run_results:
+            report_filename = f"optimization_report_rank_{rank}.html"
+            generate_html_report(final_run_results, final_run_config, report_filename)
 
 if __name__ == '__main__':
     log.info("Backtester starting up.")
