@@ -1,1066 +1,1304 @@
+#!/usr/bin/env python3
+"""
+back.py
+
+Combined downloader + backtester script.
+ - Uses a fixed symbol list (per user request)
+ - Downloads klines from Binance only if the expected CSV for the requested date range doesn't already exist
+ - Runs Backtesting.py using a Bollinger-limit strategy (Version 2 rules)
+ - Uses robust sizing for small accounts with leverage
+
+Usage: python back.py
+Dependencies: requests, pandas, backtesting
+Install: pip install requests pandas backtesting plotly
+"""
+
 import os
-import sys
 import time
 import math
-import asyncio
-import logging
-import json
-import sqlite3
-import io
-import re
-import traceback
-from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, Optional, List
-from collections import deque
-from decimal import Decimal, ROUND_DOWN, getcontext
-import argparse
-
 import requests
-import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import numpy as np
+from datetime import datetime, timedelta
 
-from binance.client import Client
-from binance.exceptions import BinanceAPIException
+# ----------------------
+# Config / Defaults
+# ----------------------
+BINANCE_REST = "https://api.binance.com"
+DATA_DIR = "data"
+ENV_FILE = ".env"
+DEFAULT_INTERVAL = "15m"
+KLIMIT = 1000
+REQUEST_SLEEP = 0.25
 
-from dotenv import load_dotenv
-
-# Load .env file into environment (if present)
-load_dotenv()
-
-# --- Logging ---
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
-log = logging.getLogger("backtester")
-
-
-# --- Default Configuration ---
-# This dictionary contains the default settings for the backtest.
-# A 'config.json' file will be created on first run, which you can edit.
-CONFIG = {
-    "SYMBOLS": ["BTCUSDT", "ETHUSDT", "BNBUSDT"],
-    "TIMEFRAME": "15m",
-    "BIG_TIMEFRAME": "4h",
-    "INITIAL_CAPITAL": 10000.0,
-    "BINANCE_FEE": 0.0004,  # 0.04% fee for futures market orders
-
-    "KAMA_LENGTH": 14,
-    "KAMA_FAST": 2,
-    "KAMA_SLOW": 30,
-
-    "ATR_LENGTH": 14,
-    "SL_TP_ATR_MULT": 2.5,
-
-    "RISK_PCT_LARGE": 0.02,  # 2% risk per trade
-    "RISK_SMALL_BALANCE_THRESHOLD": 50.0,
-    "RISK_SMALL_FIXED_USDT": 0.5,
-    "MAX_RISK_USDT": 0.0,  # 0 disables cap
-
-    "VOLATILITY_ADJUST_ENABLED": True,
-    "TRENDING_ADX": 40.0,
-    "TRENDING_CHOP": 40.0,
-    "TRENDING_RISK_MULT": 1.5,
-    "CHOPPY_ADX": 25.0,
-    "CHOPPY_CHOP": 60.0,
-    "CHOPPY_RISK_MULT": 0.5,
-
-    "ADX_LENGTH": 14,
-    "ADX_THRESHOLD": 30.0,
-
-    "CHOP_LENGTH": 14,
-    "CHOP_THRESHOLD": 60.0,
-
-    "BB_LENGTH": 20,
-    "BB_STD": 2.0,
-    "BBWIDTH_THRESHOLD": 12.0,
-
-    "MIN_CANDLES_AFTER_CLOSE": 10,
-
-    "TRAILING_ENABLED": True,
-    "BE_AUTO_MOVE_ENABLED": True,
-
-    "DYN_SLTP_ENABLED": True,
-    "TP1_ATR_MULT": 1.0,
-    "TP2_ATR_MULT": 2.0,
-    "TP3_ATR_MULT": 3.0,
-    "TP1_CLOSE_PCT": 0.5,
-    "TP2_CLOSE_PCT": 0.25,
-
-    "MIN_NOTIONAL_USDT": 5.0,
-    "INTRABAR_EXECUTION_RULE": "assume_next_bar_open", # Or "assume_current_bar_close"
-    "HEDGING_ENABLED": False,
+INTERVAL_MS = {
+    '1m': 60_000,
+    '3m': 3*60_000,
+    '5m': 5*60_000,
+    '15m': 15*60_000,
+    '30m': 30*60_000,
+    '1h': 60*60_000,
+    '2h': 2*60*60_000,
+    '4h': 4*60*60_000,
+    '6h': 6*60*60_000,
+    '8h': 8*60*60_000,
+    '12h': 12*60*60_000,
+    '1d': 24*60*60_000,
+    '3d': 3*24*60*60_000,
+    '1w': 7*24*60*60_000,
+    '1M': 30*24*60*60_000
 }
 
-def setup_config(config_file="config.json"):
+# Fixed symbol list as requested
+FIXED_SYMBOLS = [
+    "BTCUSDT",
+    "ETHUSDT",
+    "BNBUSDT",
+    "XRPUSDT",
+    "SOLUSDT",
+    "TRXUSDT",
+    "DOGEUSDT",
+    "ADAUSDT",
+    "XLMUSDT",
+    "TONUSDT",
+    "LTCUSDT",
+    "DOTUSDT",
+    "UNIUSDT",
+    "AAVEUSDT",
+    "ETCUSDT",
+    "TRUMPUSDT",
+]
+
+# ----------------------
+# Helper functions (Download, Indicators - unchanged)
+# ----------------------
+
+def write_env(api_key: str, api_secret: str, symbols: list, starting_balance, days):
+    symbols_str = ",".join(symbols)
+    content_lines = [
+        "# Auto-generated .env - keep this file safe (contains API secret)",
+        f"BINANCE_API_KEY={api_key}",
+        f"BINANCE_API_SECRET={api_secret}",
+        f"SYMBOLS={symbols_str}",
+        f"STARTING_BALANCE={starting_balance}",
+        f"DATA_DAYS={days}",
+    ]
+    with open(ENV_FILE, 'w') as f:
+        f.write("\n".join(content_lines) + "\n")
+    print(f"Wrote {ENV_FILE} with {len(symbols)} symbol(s).")
+
+
+def _klines_url(symbol, interval, start_time=None, end_time=None, limit=1000):
+    url = BINANCE_REST + "/api/v3/klines"
+    params = {
+        'symbol': symbol,
+        'interval': interval,
+        'limit': limit
+    }
+    if start_time is not None:
+        params['startTime'] = int(start_time)
+    if end_time is not None:
+        params['endTime'] = int(end_time)
+    return url, params
+
+
+def download_klines(symbol: str, interval: str, days: int, out_dir=DATA_DIR):
+    """Download klines for `symbol` from (now - days) to now in chunks and save CSV.
+
+    If the exact file already exists on disk, skip downloading and return its path.
+    Returns path to saved CSV or None on failure.
     """
-    Loads configuration from a JSON file. If the file doesn't exist,
-    it creates one with default values.
-    """
-    global CONFIG
-    if os.path.exists(config_file):
-        log.info(f"Loading configuration from {config_file}")
-        with open(config_file, 'r') as f:
-            user_config = json.load(f)
-            CONFIG.update(user_config)
-    else:
-        log.info(f"Configuration file not found. Creating default {config_file}")
-        with open(config_file, 'w') as f:
-            json.dump(CONFIG, f, indent=4)
-    return CONFIG
+    assert interval in INTERVAL_MS, f"Unsupported interval {interval}"
+    os.makedirs(out_dir, exist_ok=True)
 
+    now_ms = int(time.time() * 1000)
+    start_ms = now_ms - int(days * 24 * 60 * 60 * 1000)
 
-# --- Exchange Info Cache & Helpers (from app.py) ---
-EXCHANGE_INFO_CACHE = {"data": None}
+    start_ts = datetime.utcfromtimestamp(start_ms/1000).strftime('%Y%m%d')
+    end_ts = datetime.utcfromtimestamp(now_ms/1000).strftime('%Y%m%d')
+    filename = f"{symbol}_{interval}_{start_ts}_{end_ts}.csv"
+    path = os.path.join(out_dir, filename)
+    if os.path.exists(path):
+        print(f"Found existing {path}, skipping download.")
+        return path
 
-def fetch_and_cache_exchange_info(client):
-    """
-    Fetches exchange info and caches it. This should be called once at startup.
-    """
-    global EXCHANGE_INFO_CACHE
-    try:
-        log.info("Fetching and caching exchange information...")
-        exchange_info = client.futures_exchange_info()
-        EXCHANGE_INFO_CACHE["data"] = exchange_info
-        log.info("Successfully cached exchange information.")
-    except BinanceAPIException as e:
-        log.error(f"Failed to fetch exchange info: {e}. The backtester may fail on rounding.")
-        sys.exit(1)
+    step_ms = INTERVAL_MS[interval] * KLIMIT
 
-def get_exchange_info_sync():
-    """Gets the cached exchange information."""
-    return EXCHANGE_INFO_CACHE["data"]
-
-def get_symbol_info(symbol: str) -> Optional[Dict[str, Any]]:
-    """Retrieves the cached exchange info for a specific symbol."""
-    info = get_exchange_info_sync()
-    if not info:
-        return None
-    try:
-        symbols = info.get('symbols', [])
-        return next((s for s in symbols if s.get('symbol') == symbol), None)
-    except Exception:
-        return None
-
-def round_price(symbol: str, price: float) -> float:
-    """
-    Rounds the price to the correct number of decimal places based on the
-    symbol's PRICE_FILTER tickSize.
-    """
-    try:
-        info = get_exchange_info_sync()
-        if not info or not isinstance(info, dict):
-            return float(price)
-        symbol_info = next((s for s in info.get('symbols', []) if s.get('symbol') == symbol), None)
-        if not symbol_info:
-            return float(price)
-        for f in symbol_info.get('filters', []):
-            if f.get('filterType') == 'PRICE_FILTER':
-                tick_size = Decimal(str(f.get('tickSize', '0.00000001')))
-                getcontext().prec = 28
-                p = Decimal(str(price))
-                rounded_price = p.quantize(tick_size, rounding=ROUND_DOWN)
-                return float(rounded_price)
-    except Exception:
-        log.exception("round_price failed; falling back to float")
-    return float(price)
-
-def get_max_leverage(symbol: str) -> int:
-    """Gets the max leverage for a symbol from the cached exchange info."""
-    try:
-        s = get_symbol_info(symbol)
-        if s:
-            # The 'leverages' list contains leverage brackets. We want the highest one.
-            # Example: ['125', '100', '50', '20', '10', '5', '4', '3', '2', '1']
-            if 'leverages' in s and isinstance(s['leverages'], list) and s['leverages']:
-                return int(s['leverages'][0])
-        # Fallback for older structures or if 'leverages' is not present
-        return 125
-    except Exception:
-        return 125
-
-def round_qty(symbol: str, qty: float) -> float:
-    """
-    Rounds the quantity to the correct number of decimal places based on the
-    symbol's LOT_SIZE stepSize.
-    """
-    try:
-        info = get_exchange_info_sync()
-        if not info or not isinstance(info, dict):
-            return float(qty)
-        symbol_info = next((s for s in info.get('symbols', []) if s.get('symbol') == symbol), None)
-        if not symbol_info:
-            return float(qty)
-        for f in symbol_info.get('filters', []):
-            if f.get('filterType') == 'LOT_SIZE':
-                step = Decimal(str(f.get('stepSize', '1')))
-                getcontext().prec = 28
-                q = Decimal(str(qty))
-                steps = (q // step)
-                quant = (steps * step).quantize(step, rounding=ROUND_DOWN)
-                if quant <= 0:
-                    return 0.0
-                return float(quant)
-    except Exception:
-        log.exception("round_qty failed; falling back to float")
-    return float(qty)
-
-
-# --- Indicators (copied from app.py) ---
-
-def init_binance_client():
-    """Initializes the Binance client from environment variables."""
-    api_key = os.getenv("BINANCE_API_KEY")
-    api_secret = os.getenv("BINANCE_API_SECRET")
-    if not api_key or not api_secret:
-        log.error("Binance API key/secret not found in environment variables.")
-        log.error("Please set BINANCE_API_KEY and BINANCE_API_SECRET to download data.")
-        sys.exit(1)
-    
-    client = Client(api_key, api_secret)
-    log.info("Binance client initialized successfully.")
-    return client
-
-def download_historical_data(client, config, data_file="historical_data.parquet"):
-    """
-    Downloads historical k-line data from Binance and saves it to a file.
-    """
-    try:
-        days_input = input("How many days of historical data would you like to download? ")
-        days = int(days_input)
-        if days <= 0:
-            raise ValueError("Please enter a positive number of days.")
-    except (ValueError, EOFError) as e:
-        log.error(f"Invalid input: {e}. Please run the script again and enter a positive number.")
-        sys.exit(1)
-
-    all_klines_df = []
-    end_date = datetime.now(timezone.utc)
-    start_date = end_date - timedelta(days=days)
-    start_str = start_date.strftime("%d %b, %Y")
-
-    log.info(f"Downloading {days} days of data from {start_str} for symbols: {config['SYMBOLS']}")
-
-    for symbol in config['SYMBOLS']:
-        log.info(f"Fetching data for {symbol}...")
+    all_rows = []
+    fetch_start = start_ms
+    total = 0
+    print(f"Downloading {symbol} from {datetime.utcfromtimestamp(start_ms/1000).isoformat()} to {datetime.utcfromtimestamp(now_ms/1000).isoformat()} ({days} days) with interval {interval}...")
+    while fetch_start < now_ms:
+        fetch_end = min(fetch_start + step_ms - 1, now_ms)
+        url, params = _klines_url(symbol, interval, start_time=fetch_start, end_time=fetch_end, limit=KLIMIT)
         try:
-            klines_generator = client.get_historical_klines_generator(
-                symbol,
-                config['TIMEFRAME'],
-                start_str=start_str
-            )
-            
-            cols = ['open_time','open','high','low','close','volume','close_time','qav','num_trades','taker_base','taker_quote','ignore']
-            df = pd.DataFrame(klines_generator, columns=cols)
-            
-            if df.empty:
-                log.warning(f"No data found for {symbol} in the specified range.")
-                continue
-
-            # --- Data Cleaning and Type Conversion ---
-            df['symbol'] = symbol
-            df['open_time'] = pd.to_datetime(df['open_time'], unit='ms', utc=True)
-            df['close_time'] = pd.to_datetime(df['close_time'], unit='ms', utc=True)
-            for col in ['open', 'high', 'low', 'close', 'volume', 'qav', 'taker_base', 'taker_quote']:
-                df[col] = pd.to_numeric(df[col])
-            df.set_index('close_time', inplace=True)
-            
-            all_klines_df.append(df)
-        except BinanceAPIException as e:
-            log.error(f"Error downloading data for {symbol}: {e}")
+            r = requests.get(url, params=params, timeout=30)
+            r.raise_for_status()
         except Exception as e:
-            log.error(f"An unexpected error occurred for {symbol}: {e}")
-
-
-    if not all_klines_df:
-        log.error("Failed to download any data. Exiting.")
-        sys.exit(1)
-
-    final_df = pd.concat(all_klines_df)
-    log.info(f"Downloaded a total of {len(final_df)} k-lines.")
-    
-    # Save to efficient parquet format
-    final_df.to_parquet(data_file)
-    log.info(f"Data saved successfully to {data_file}")
-    return final_df
-
-def kama(series: pd.Series, length: int, fast: int, slow: int) -> pd.Series:
-    price = series.values
-    n = len(price)
-    kama_arr = np.zeros(n)
-    sc_fast = 2 / (fast + 1)
-    sc_slow = 2 / (slow + 1)
-    if n >= length:
-        kama_arr[:length] = np.mean(price[:length])
-    else:
-        kama_arr[:] = price.mean()
-    for i in range(length, n):
-        change = abs(price[i] - price[i - length])
-        volatility = np.sum(np.abs(price[i - length + 1:i + 1] - price[i - length:i]))
-        er = 0.0
-        if volatility != 0:
-            er = change / volatility
-        sc = (er * (sc_fast - sc_slow) + sc_slow) ** 2
-        kama_arr[i] = kama_arr[i - 1] + sc * (price[i] - kama_arr[i - 1])
-    return pd.Series(kama_arr, index=series.index)
-
-def atr(df: pd.DataFrame, length: int) -> pd.Series:
-    high = df['high']; low = df['low']; close = df['close']
-    tr1 = high - low
-    tr2 = (high - close.shift(1)).abs()
-    tr3 = (low - close.shift(1)).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    return tr.rolling(length, min_periods=1).mean()
-
-def adx(df: pd.DataFrame, length: int) -> pd.Series:
-    high = df['high']; low = df['low']; close = df['close']
-    up_move = high.diff()
-    down_move = -low.diff()
-    plus_dm = ((up_move > down_move) & (up_move > 0)) * up_move
-    minus_dm = ((down_move > up_move) & (down_move > 0)) * down_move
-    tr1 = (high - low)
-    tr2 = (high - close.shift(1)).abs()
-    tr3 = (low - close.shift(1)).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_w = tr.rolling(length, min_periods=1).mean()
-    plus_di = 100 * (plus_dm.rolling(length, min_periods=1).sum() / atr_w)
-    minus_di = 100 * (minus_dm.rolling(length, min_periods=1).sum() / atr_w)
-    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)).replace([np.inf, -np.inf], 0).fillna(0) * 100
-    return dx.rolling(length, min_periods=1).mean()
-
-def choppiness_index(df: pd.DataFrame, length: int) -> pd.Series:
-    high = df['high']; low = df['low']; close = df['close']
-    tr1 = high - low
-    tr2 = (high - close.shift(1)).abs()
-    tr3 = (low - close.shift(1)).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    sum_tr = tr.rolling(length, min_periods=1).sum()
-    hh = high.rolling(length, min_periods=1).max()
-    ll = low.rolling(length, min_periods=1).min()
-    denom = hh - ll
-    denom = denom.replace(0, np.nan)
-    chop = 100 * (np.log10(sum_tr / denom) / np.log10(length))
-    chop = chop.replace([np.inf, -np.inf], 100).fillna(100)
-    return chop
-
-def bb_width(df: pd.DataFrame, length: int, std_mult: float) -> pd.Series:
-    ma = df['close'].rolling(length, min_periods=1).mean()
-    std = df['close'].rolling(length, min_periods=1).std().fillna(0)
-    upper = ma + std_mult * std
-    lower = ma - std_mult * std
-    mid = ma.replace(0, np.nan)
-    width = (upper - lower) / mid
-    width = width.replace([np.inf, -np.inf], 100).fillna(100)
-    return width
-
-# --- Main application logic will go here ---
-
-def calculate_risk_amount(account_balance: float, config: dict) -> float:
-    """
-    Calculates the USDT amount to risk for a trade based on the rules from app.py.
-    """
-    if account_balance < config["RISK_SMALL_BALANCE_THRESHOLD"]:
-        risk = config["RISK_SMALL_FIXED_USDT"]
-    else:
-        risk = account_balance * config["RISK_PCT_LARGE"]
-    
-    max_cap = config.get("MAX_RISK_USDT", 0.0)
-    if max_cap and max_cap > 0:
-        risk = min(risk, max_cap)
-        
-    return float(risk)
-
-
-def calculate_trade_details(symbol: str, price: float, stop_price: float, balance: float, risk_multiplier: float, config: dict) -> Optional[Dict[str, Any]]:
-    """
-    Calculates the full trade details (qty, notional, leverage, risk) based on the app.py logic.
-    Returns a dictionary with trade details or None if the trade is invalid.
-    """
-    risk_usdt = calculate_risk_amount(balance, config) * risk_multiplier
-    if risk_usdt <= 0:
-        log.debug(f"Skipping trade for {symbol}: Risk amount is not positive ({risk_usdt})")
-        return None
-
-    price_distance = abs(price - stop_price)
-    if price_distance <= 0:
-        log.debug(f"Skipping trade for {symbol}: Price distance for SL is zero.")
-        return None
-
-    # Initial quantity calculation
-    qty = risk_usdt / price_distance
-    qty = round_qty(symbol, qty)
-    if qty <= 0:
-        log.debug(f"Skipping trade for {symbol}: Quantity rounded to zero.")
-        return None
-
-    notional = qty * price
-    min_notional = config.get("MIN_NOTIONAL_USDT", 5.0)
-
-    # Boost to meet minimum notional if necessary
-    if notional < min_notional:
-        required_qty = min_notional / price
-        new_risk = required_qty * price_distance
-        
-        # In a backtest, we assume we can always take the risk if needed to meet the minimum.
-        # A live bot might have a check here (`if new_risk > balance`).
-        risk_usdt = new_risk
-        qty = round_qty(symbol, required_qty)
-        if qty <= 0:
-            log.debug(f"Skipping trade for {symbol}: Boosted quantity rounded to zero.")
-            return None
-        notional = qty * price
-
-    # Final check after potential boosting
-    if notional < min_notional:
-        log.debug(f"Skipping trade for {symbol}: Notional value ({notional}) is still less than minimum ({min_notional}).")
-        return None
-
-    # Leverage Calculation (from app.py)
-    margin_to_use = risk_usdt
-    if balance < config["RISK_SMALL_BALANCE_THRESHOLD"]:
-        # In the live app, this is a separate config, but we can derive it for simplicity
-        margin_to_use = config.get("MARGIN_USDT_SMALL_BALANCE", 2.0)
-        
-    margin_to_use = min(margin_to_use, notional)
-    leverage = int(math.floor(notional / max(margin_to_use, 1e-9)))
-
-    # Apply safety caps on leverage
-    max_leverage_from_config = config.get("MAX_BOT_LEVERAGE", 20)
-    max_leverage_from_exchange = get_max_leverage(symbol)
-    leverage = max(1, min(leverage, max_leverage_from_config, max_leverage_from_exchange))
-
-    return {
-        "qty": qty,
-        "notional": notional,
-        "leverage": leverage,
-        "risk_usdt": risk_usdt
-    }
-
-def simulate_place_market_order_with_sl_tp(
-    symbol: str, side: str, qty: float, leverage: int,
-    entry_price: float, sl_price: float, tp_price: float,
-    timestamp: datetime, risk_usdt: float, notional: float,
-    tp1: Optional[float], tp2: Optional[float]
-) -> Dict[str, Any]:
-    """
-    Simulates the placement of a market order and returns a trade object
-    structured like the one in app.py.
-    """
-    trade_id = f"{symbol}_{int(timestamp.timestamp())}"
-    
-    # In a backtest, the order is "filled" instantly at the determined entry_price.
-    # The structure here mimics the 'meta' object from app.py.
-    trade = {
-        "id": trade_id,
-        "symbol": symbol,
-        "side": side,
-        "entry_price": entry_price,
-        "entry_time": timestamp,
-        "initial_qty": qty,
-        "qty": qty,
-        "notional": notional,
-        "leverage": leverage,
-        "sl": sl_price,
-        "tp": tp_price,
-        "risk_usdt": risk_usdt,
-        "trade_phase": 0,
-        "be_moved": False,
-        "tp1": tp1,
-        "tp2": tp2,
-        # sltp_orders would be populated in a live environment, but is less critical here
-        "sltp_orders": {"stop_order": {"status": "NEW"}, "tp_order": {"status": "NEW"}},
-    }
-    return trade
-
-
-def run_backtest(config, data_df):
-    """The core backtesting engine, now with advanced trade management."""
-    log.info("Starting backtest with advanced trade management...")
-    
-    # --- Initialization ---
-    capital = config["INITIAL_CAPITAL"]
-    equity_curve = []
-    open_trades = []
-    closed_trades = []
-    last_trade_close_time = {}
-    trade_id_counter = 0
-
-    # --- Pre-calculate Indicators ---
-    log.info("Pre-calculating indicators for all symbols...")
-    indicator_dfs = []
-    for symbol, group_df in data_df.groupby('symbol'):
-        group_df_copy = group_df.copy()
-        group_df_copy['kama'] = kama(group_df_copy['close'], config["KAMA_LENGTH"], config["KAMA_FAST"], config["KAMA_SLOW"])
-        group_df_copy['atr'] = atr(group_df_copy, config["ATR_LENGTH"])
-        group_df_copy['adx'] = adx(group_df_copy, config["ADX_LENGTH"])
-        group_df_copy['chop'] = choppiness_index(group_df_copy, config["CHOP_LENGTH"])
-        group_df_copy['bbw'] = bb_width(group_df_copy, config["BB_LENGTH"], config["BB_STD"]) * 100.0
-        indicator_dfs.append(group_df_copy)
-
-    if not indicator_dfs:
-        log.error("Could not calculate indicators for any symbol. Exiting.")
-        return None
-        
-    data_df = pd.concat(indicator_dfs).sort_index()
-
-    data_df_resample = data_df.set_index('open_time')
-    big_tf_df = data_df_resample.groupby('symbol').resample(config['BIG_TIMEFRAME']).agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna()
-    big_tf_df['kama'] = big_tf_df.groupby('symbol')['close'].transform(lambda x: kama(x, config["KAMA_LENGTH"], config["KAMA_FAST"], config["KAMA_SLOW"]))
-    big_tf_df['trend_big'] = big_tf_df.groupby('symbol')['kama'].diff().apply(lambda x: 'bull' if x > 0 else 'bear')
-    
-    data_df_reset = data_df.reset_index()
-    big_tf_df_reset = big_tf_df.reset_index()
-    data_df_sorted = data_df_reset.sort_values('open_time')
-    big_tf_df_sorted = big_tf_df_reset.sort_values('open_time')
-    
-    merged_df = pd.merge_asof(left=data_df_sorted, right=big_tf_df_sorted[['symbol', 'open_time', 'trend_big']], on='open_time', by='symbol', direction='backward')
-    data_df = merged_df.set_index('close_time').sort_index()
-    
-    data_df['prev_close'] = data_df.groupby('symbol')['close'].shift(1)
-    data_df['prev_kama'] = data_df.groupby('symbol')['kama'].shift(1)
-
-    log.info("Indicator calculation complete. Starting main backtest loop...")
-    
-    # --- Main Loop ---
-    # Use .iterrows() to get index (timestamp) and row data
-    for i, (timestamp, row) in enumerate(data_df.iterrows()):
-        
-        # --- Manage Open Trades ---
-        # This part checks existing trades against the current bar's data (e.g., for SL/TP hits)
-        # --- Manage Open Trades ---
-        unrealized_pnl_for_symbol = 0
-        for trade in open_trades[:]:
-            if trade['symbol'] != row['symbol']:
-                continue
-
-            # Update unrealized PnL for the current symbol
-            unrealized_pnl_for_symbol += (row['close'] - trade['entry_price']) * trade['qty'] if trade['side'] == 'BUY' else (trade['entry_price'] - row['close']) * trade['qty']
-
-            # --- Dynamic TP & SL Management ---
-            # Phase 1: TP1 Hit -> Move SL to Breakeven
-            if config["DYN_SLTP_ENABLED"] and trade['phase'] == 0:
-                hit_tp1 = (trade['side'] == 'BUY' and row['high'] >= trade['tp1']) or \
-                          (trade['side'] == 'SELL' and row['low'] <= trade['tp1'])
-                if hit_tp1:
-                    qty_to_close = round_qty(row['symbol'], trade['initial_qty'] * config['TP1_CLOSE_PCT'])
-                    if qty_to_close > 0:
-                        exit_price = trade['tp1']
-                        pnl = (exit_price - trade['entry_price']) * qty_to_close if trade['side'] == 'BUY' else (trade['entry_price'] - exit_price) * qty_to_close
-                        exit_notional = qty_to_close * exit_price
-                        fee = exit_notional * config['BINANCE_FEE']
-                        capital += pnl - fee
-                        
-                        closed_trades.append({'id': f"{trade['id']}_p1", 'exit_price': exit_price, 'exit_time': timestamp, 'pnl': pnl - fee, 'qty': qty_to_close})
-                        
-                        trade['qty'] -= qty_to_close
-                        trade['sl'] = trade['entry_price']
-                        trade['phase'] = 1
-                        log.info(f"Trade {trade['id']} hit TP1. Closed {qty_to_close} units. Moved SL to BE.")
-
-            # Phase 2: TP2 Hit -> Move SL to TP1
-            if config["DYN_SLTP_ENABLED"] and trade['phase'] == 1:
-                hit_tp2 = (trade['side'] == 'BUY' and row['high'] >= trade['tp2']) or \
-                          (trade['side'] == 'SELL' and row['low'] <= trade['tp2'])
-                if hit_tp2:
-                    qty_to_close = round_qty(row['symbol'], trade['initial_qty'] * config['TP2_CLOSE_PCT'])
-                    if qty_to_close > 0:
-                        exit_price = trade['tp2']
-                        pnl = (exit_price - trade['entry_price']) * qty_to_close if trade['side'] == 'BUY' else (trade['entry_price'] - exit_price) * qty_to_close
-                        exit_notional = qty_to_close * exit_price
-                        fee = exit_notional * config['BINANCE_FEE']
-                        capital += pnl - fee
-                        
-                        closed_trades.append({'id': f"{trade['id']}_p2", 'exit_price': exit_price, 'exit_time': timestamp, 'pnl': pnl - fee, 'qty': qty_to_close})
-                        
-                        trade['qty'] -= qty_to_close
-                        trade['sl'] = trade['tp1']
-                        trade['phase'] = 2
-                        log.info(f"Trade {trade['id']} hit TP2. Closed {qty_to_close} units. Moved SL to TP1.")
-
-            # --- Final SL/TP check for the remaining position ---
-            closed = False
-            exit_price = 0
-            if trade['side'] == 'BUY':
-                if row['low'] <= trade['sl']: closed = True; exit_price = trade['sl']
-                elif row['high'] >= trade['tp']: closed = True; exit_price = trade['tp']
-            elif trade['side'] == 'SELL':
-                if row['high'] >= trade['sl']: closed = True; exit_price = trade['sl']
-                elif row['low'] <= trade['tp']: closed = True; exit_price = trade['tp']
-
-            if closed:
-                pnl = (exit_price - trade['entry_price']) * trade['qty'] if trade['side'] == 'BUY' else (trade['entry_price'] - exit_price) * trade['qty']
-                exit_notional = trade['qty'] * exit_price
-                fee = exit_notional * config['BINANCE_FEE']
-                capital += pnl - fee
-                
-                closed_trades.append({'id': f"{trade['id']}_final", 'exit_price': exit_price, 'exit_time': timestamp, 'pnl': pnl - fee, 'qty': trade['qty']})
-                open_trades.remove(trade)
-                last_trade_close_time[row['symbol']] = timestamp
-                continue
-        
-        # --- Check for New Entries ---
-        existing_trade_for_symbol = next((t for t in open_trades if t['symbol'] == row['symbol']), None)
-        if not config.get("HEDGING_ENABLED", False) and existing_trade_for_symbol:
+            print(f"Warning: request failed for {symbol}: {e}. Retrying after sleep...")
+            time.sleep(1)
             continue
-        
-        if row['symbol'] in last_trade_close_time and (timestamp - last_trade_close_time[row['symbol']]) / pd.Timedelta(config['TIMEFRAME']) < config["MIN_CANDLES_AFTER_CLOSE"]:
-            continue
-        
-        kama_now, kama_prev, prev_close = row['kama'], row['prev_kama'], row['prev_close']
-        if pd.isna(kama_prev) or pd.isna(prev_close): continue
-        
-        trend_small = 'bull' if (kama_now - kama_prev) > 0 else 'bear'
-        trend_big = row['trend_big']
-        
-        if trend_small != trend_big: continue
-        if not (row['adx'] >= config["ADX_THRESHOLD"] and row['chop'] < config["CHOP_THRESHOLD"] and row['bbw'] < config["BBWIDTH_THRESHOLD"]): continue
-        
-        crossed_above = (prev_close <= kama_prev) and (row['close'] > kama_now)
-        crossed_below = (prev_close >= kama_prev) and (row['close'] < kama_now)
-        
-        side = None
-        if crossed_above and trend_small == 'bull': side = 'BUY'
-        elif crossed_below and trend_small == 'bear': side = 'SELL'
-        
-        if side:
-            # --- Get Entry Price based on Execution Rule ---
-            if i + 1 >= len(data_df): continue # Cannot enter on the last bar
-            next_bar = data_df.iloc[i+1]
-            if next_bar['symbol'] != row['symbol']: continue # Ensure next bar is the same symbol in a multi-asset df
+        data = r.json()
+        if not data:
+            break
+        for row in data: # Fixed the syntax error here
+            all_rows.append(row)
+        total += len(data)
+        last_open = data[-1][0]
+        fetch_start = last_open + INTERVAL_MS[interval]
+        time.sleep(REQUEST_SLEEP)
 
-            entry_price = next_bar['open']
-            entry_timestamp = next_bar.name # This is the index (timestamp) of the next bar
+    print(f"Fetched {total} candles for {symbol}.")
+
+    if not all_rows:
+        print(f"No data for {symbol}, skipping file write.")
+        return None
+
+    df = pd.DataFrame(all_rows, columns=[
+        'OpenTime','Open','High','Low','Close','Volume','CloseTime','QuoteAssetVolume','NumTrades','TakerBuyBaseVol','TakerBuyQuoteVol','Ignore'
+    ])
+    df['OpenTime'] = pd.to_datetime(df['OpenTime'], unit='ms')
+    df['CloseTime'] = pd.to_datetime(df['CloseTime'], unit='ms')
+    numeric_cols = ['Open','High','Low','Close','Volume','QuoteAssetVolume','TakerBuyBaseVol','TakerBuyQuoteVol']
+    for c in numeric_cols:
+        df[c] = pd.to_numeric(df[c], errors='coerce')
+
+    df.to_csv(path, index=False)
+    print(f"Saved {path} ({len(df)} rows)")
+    return path
+
+# ----------------------
+# Indicators / Strategy helpers
+# ----------------------
+
+def bollinger_bands(series: pd.Series, length=20, std_mul=2.0):
+    ma = series.rolling(length).mean()
+    std = series.rolling(length).std()
+    upper = ma + std_mul * std
+    lower = ma - std_mul * std
+    return ma, upper, lower
+
+
+def atr(df: pd.DataFrame, length=14):
+    high = df['High']
+    low = df['Low']
+    close = df['Close']
+    tr = pd.concat([
+        high - low,
+        (high - close.shift()).abs(),
+        (low - close.shift()).abs()
+    ], axis=1).max(axis=1)
+    return tr.rolling(length).mean()
+
+# ----------------------
+# Strategy (Backtesting.py)
+# ----------------------
+try:
+    from backtesting import Strategy, Backtest
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+except Exception:
+    Strategy = None
+    Backtest = None
+
+class BollingerLimitV2(Strategy if Strategy is not None else object):
+    bb_length = 20
+    bb_std = 2.0
+    atr_length = 14
+    atr_mult = 2.5
+    limit_pct = 0.005  # 0.5% limit order distance
+    cooldown_hours = 6
+    rr = 2.0  # Risk/Reward ratio
+    be_trigger_pct = 0.006  # 0.6% for break-even trigger
+    be_sl_offset = 0.001  # Move SL to 0.1% from entry
+
+    def init(self):
+        # Convert backtesting arrays to pandas Series with datetime index
+        idx = self.data.index
+        close = pd.Series(self.data.Close, index=idx).astype(float)
+        high = pd.Series(self.data.High, index=idx).astype(float)
+        low = pd.Series(self.data.Low, index=idx).astype(float)
+
+        self.ma, self.upper, self.lower = bollinger_bands(close, self.bb_length, self.bb_std)
+        ohlc_df = pd.DataFrame({'High': high, 'Low': low, 'Close': close})
+        self.atr = atr(ohlc_df, self.atr_length)
+
+        self.pending = None
+        self.cooldown_until = None
+
+    def next(self):
+        i = len(self.data.Close) - 1
+        now_ts = self.data.index[i]
+
+        # Check if pending order expired
+        if self.pending is not None and i > self.pending.get('expire_idx', -1):
+            self.pending = None
+
+        # Manage open position
+        if self.position:
+            # Use the entry_price stored by the strategy when the trade was opened
+            entry_price = self.position.entry_price
+            is_long = self.position.is_long
+            cur_close = float(self.data.Close[-1])
+
+            # Calculate current PnL percentage
+            if is_long:
+                pnl_pct = (cur_close / entry_price) - 1.0
+            else:
+                pnl_pct = 1.0 - (cur_close / entry_price)
+
+            # Break-even and trailing logic (when +0.6% profit)
+            if pnl_pct >= self.be_trigger_pct:
+                # Set break-even SL
+                if is_long:
+                    new_sl = entry_price * (1.0 + self.be_sl_offset)
+                else:
+                    new_sl = entry_price * (1.0 - self.be_sl_offset)
+
+                # Only update SL if it's better than current
+                if self.position.sl is None:
+                    self.position.sl = new_sl
+                else:
+                    if is_long and new_sl > self.position.sl:
+                        self.position.sl = new_sl
+                    if (not is_long) and new_sl < self.position.sl:
+                        self.position.sl = new_sl
+
+                # Apply trailing stop using ATR
+                atr_now = float(self.atr.iloc[-1]) if not np.isnan(self.atr.iloc[-1]) else None
+                if atr_now is not None:
+                    if is_long:
+                        trailing_sl = cur_close - atr_now
+                        if trailing_sl > (self.position.sl or 0):
+                            self.position.sl = trailing_sl
+                    else:
+                        trailing_sl = cur_close + atr_now
+                        if (self.position.sl is None) or trailing_sl < self.position.sl:
+                            self.position.sl = trailing_sl
+
+            # Partial TP when original TP hit
+            tp_price = getattr(self.position, 'custom_tp', None) # Use custom TP
+            if tp_price is not None:
+                half_taken = getattr(self.position, 'half_taken', False)
+                if not half_taken:
+                    if is_long and float(self.data.High[-1]) >= tp_price:
+                        self.position.half_taken = True
+                        # Close 50% position
+                        self.position.close(portion=0.5)
+                    elif (not is_long) and float(self.data.Low[-1]) <= tp_price:
+                        self.position.half_taken = True
+                        self.position.close(portion=0.5)
+
+        # If no open position, handle pending fills or create new pending
+        if not self.position:
+            # Check pending fill on this bar
+            if self.pending is not None:
+                pend = self.pending
+                high = float(self.data.High[-1])
+                low = float(self.data.Low[-1])
+                filled = False
+
+                if pend['type'] == 'long':
+                    if low <= pend['limit_price'] <= high:
+                        filled = True
+                        entry_price = pend['limit_price']
+                        self._enter_trade_long(entry_price)
+                else:  # short
+                    if low <= pend['limit_price'] <= high:
+                        filled = True
+                        entry_price = pend['limit_price']
+                        self._enter_trade_short(entry_price)
+
+                if filled:
+                    self.pending = None
+
+            # Create new pending orders if no position and no pending order
+            if self.pending is None:
+                # Check cooldown period
+                if self.cooldown_until is not None and now_ts < self.cooldown_until:
+                    return
+
+                close = float(self.data.Close[-1])
+                upper = float(self.upper.iloc[-1]) if not np.isnan(self.upper.iloc[-1]) else None
+                lower = float(self.lower.iloc[-1]) if not np.isnan(self.lower.iloc[-1]) else None
+
+                if upper is None or lower is None:
+                    return
+
+                # Entry conditions
+                if close >= upper:  # Short signal - price touches/crosses upper band
+                    limit_price = close * (1.0 - self.limit_pct)  # 0.5% below close
+                    self.pending = {
+                        'type': 'short',
+                        'limit_price': limit_price,
+                        'expire_idx': i + 1,  # Expires after 1 candle
+                        'entry_close': close
+                    }
+                elif close <= lower:  # Long signal - price touches/crosses lower band
+                    limit_price = close * (1.0 + self.limit_pct)  # 0.5% above close
+                    self.pending = {
+                        'type': 'long',
+                        'limit_price': limit_price,
+                        'expire_idx': i + 1,  # Expires after 1 candle
+                        'entry_close': close
+                    }
+
+    def _calculate_risk_amount(self):
+        """Calculate risk amount based on account balance"""
+        equity = self.equity
+        if equity < 50:
+            return 0.5  # Fixed 0.5 USDT risk
+        else:
+            return equity * 0.02  # 2% of account balance
+
+    def _enter_trade_long(self, entry_price):
+        atr_now = float(self.atr.iloc[-1]) if not np.isnan(self.atr.iloc[-1]) else None
+        if atr_now is None:
+            return
+
+        # SL = entry - (2.5 * ATR)
+        sl_price = entry_price - (self.atr_mult * atr_now)
+        
+        # Validate SL calculation
+        if sl_price >= entry_price or sl_price <= 0:
+            return
             
-            # --- Calculate SL/TP based on the signal bar's data ---
-            risk_multiplier = 1.0
-            if config["VOLATILITY_ADJUST_ENABLED"]:
-                if row['adx'] > config["TRENDING_ADX"] and row['chop'] < config["TRENDING_CHOP"]: risk_multiplier = config["TRENDING_RISK_MULT"]
-                elif row['adx'] < config["CHOPPY_ADX"] or row['chop'] > config["CHOPPY_CHOP"]: risk_multiplier = config["CHOPPY_RISK_MULT"]
-            
-            sl_distance = config["SL_TP_ATR_MULT"] * row['atr']
-            if sl_distance <= 0: continue
-            
-            stop_price = entry_price - sl_distance if side == 'BUY' else entry_price + sl_distance
-            
-            # --- Sizing & Leverage ---
-            trade_details = calculate_trade_details(
-                symbol=row['symbol'], price=entry_price, stop_price=stop_price,
-                balance=capital, risk_multiplier=risk_multiplier, config=config
-            )
-            if not trade_details: continue
+        risk_per_unit = entry_price - sl_price
 
-            # --- Dynamic TP Calculation ---
-            tp1, tp2 = None, None
-            final_tp = entry_price + sl_distance if side == 'BUY' else entry_price - sl_distance
-            if config["DYN_SLTP_ENABLED"]:
-                tp1 = entry_price + (config["TP1_ATR_MULT"] * row['atr']) if side == 'BUY' else entry_price - (config["TP1_ATR_MULT"] * row['atr'])
-                tp2 = entry_price + (config["TP2_ATR_MULT"] * row['atr']) if side == 'BUY' else entry_price - (config["TP2_ATR_MULT"] * row['atr'])
-                final_tp = entry_price + (config["TP3_ATR_MULT"] * row['atr']) if side == 'BUY' else entry_price - (config["TP3_ATR_MULT"] * row['atr'])
+        # Validate risk calculation
+        if risk_per_unit <= 0:
+            return
 
-            # --- Simulate Order Placement ---
-            new_trade = simulate_place_market_order_with_sl_tp(
-                symbol=row['symbol'], side=side, qty=trade_details['qty'], leverage=trade_details['leverage'],
-                entry_price=entry_price, sl_price=stop_price, tp_price=final_tp,
-                timestamp=entry_timestamp, risk_usdt=trade_details['risk_usdt'], notional=trade_details['notional'],
-                tp1=tp1, tp2=tp2
-            )
-            open_trades.append(new_trade)
-            capital -= (trade_details['notional'] * config["BINANCE_FEE"]) # Fee on entry
-            
-        # --- Update Equity Curve ---
-        # Calculate unrealized PnL based on the close of the current bar
-        unrealized_pnl = sum(
-            (row['close'] - t['entry_price']) * t['qty'] if t['side'] == 'BUY'
-            else (t['entry_price'] - row['close']) * t['qty']
-            for t in open_trades if t['symbol'] == row['symbol']
-        )
-        equity_curve.append(capital + unrealized_pnl)
+        # Calculate risk amount
+        risk_amount = self._calculate_risk_amount()
 
-    log.info("Backtest loop finished.")
-    
-    for trade in open_trades:
-        final_row = data_df[data_df['symbol'] == trade['symbol']].iloc[-1]
-        exit_price = final_row['close']
-        fee = (trade['notional'] + (trade['qty'] * exit_price)) * config['BINANCE_FEE']
-        pnl = (exit_price - trade['entry_price']) * trade['qty'] if trade['side'] == 'BUY' else (trade['entry_price'] - exit_price) * trade['qty']
-        capital += pnl - fee
-        closed_trades.append({'id': f"{trade['id']}_force_closed", 'exit_price': exit_price, 'exit_time': final_row.name, 'pnl': pnl - fee, 'qty': trade['qty']})
+        # Avoid division by zero or negative risk
+        if risk_amount <= 0:
+            return
 
-    results = {"closed_trades": closed_trades, "equity_curve": equity_curve, "config": config}
-    log.info(f"Backtest complete. Total trades: {len(closed_trades)}. Final equity: {capital:.2f}")
-    return results
-
-def generate_html_report(results, config, filename="backtest_report.html"):
-    """Generates a comprehensive HTML report with stats and interactive charts."""
-    log.info(f"Generating HTML report to {filename}...")
-
-    closed_trades = results.get('closed_trades', [])
-    if not closed_trades:
-        log.warning("No trades were made. Cannot generate a report.")
-        html_content = "<html><body><h1>Backtest Report</h1><p>No trades were executed in this backtest.</p></body></html>"
-        with open(filename, 'w') as f:
-            f.write(html_content)
-        return
-
-    trades_df = pd.DataFrame(closed_trades)
-    # The exit_time is already a datetime object from the backtest loop
-    # trades_df['exit_time'] = pd.to_datetime(trades_df['exit_time'])
-    
-    # --- KPI Calculations ---
-    initial_capital = config['INITIAL_CAPITAL']
-    total_trades = len(trades_df)
-    winning_trades_df = trades_df[trades_df['pnl'] > 0].copy()
-    losing_trades_df = trades_df[trades_df['pnl'] <= 0].copy()
-    
-    win_count = len(winning_trades_df)
-    loss_count = len(losing_trades_df)
-    win_rate = (win_count / total_trades) * 100 if total_trades > 0 else 0
-    total_pnl = trades_df['pnl'].sum()
-    final_equity = initial_capital + total_pnl
-    total_return_pct = (total_pnl / initial_capital) * 100
-
-    gross_profit = winning_trades_df['pnl'].sum()
-    gross_loss = abs(losing_trades_df['pnl'].sum())
-    profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
-    
-    avg_win = winning_trades_df['pnl'].mean() if not winning_trades_df.empty else 0
-    avg_loss = abs(losing_trades_df['pnl'].mean()) if not losing_trades_df.empty else 0
-    risk_reward_ratio = avg_win / avg_loss if avg_loss > 0 else float('inf')
-
-    # --- Corrected Drawdown Calculation ---
-    equity_curve = pd.Series(results['equity_curve'], dtype=np.float64)
-    if equity_curve.empty or equity_curve.iloc[0] != initial_capital:
-        equity_curve = pd.concat([pd.Series([initial_capital]), equity_curve], ignore_index=True)
-    
-    running_max = equity_curve.cummax()
-    # Avoid division by zero. Replace 0 with NaN and then fill with 0.
-    drawdown = (running_max - equity_curve) / running_max.replace(0, np.nan)
-    drawdown[equity_curve < 0] = 1.0 # If equity is negative, drawdown is 100%
-    drawdown.fillna(0, inplace=True)
-    max_drawdown_pct = drawdown.max() * 100 if not drawdown.empty else 0
-    
-    # Find drawdown period for chart annotation
-    max_dd_end_idx = drawdown.idxmax() if not drawdown.empty else -1
-    max_dd_start_idx = -1
-    if max_dd_end_idx > 0:
+        # --- Simplified and Robust Size Calculation ---
+        # 1. Estimate the risk percentage based on SL distance
         try:
-            relevant_equity = equity_curve.iloc[:max_dd_end_idx + 1]
-            peak_value = relevant_equity.cummax().iloc[-1]
-            max_dd_start_idx = relevant_equity[relevant_equity >= peak_value].index[-1]
-        except (IndexError, KeyError):
-            max_dd_start_idx = 0 # Fallback
+            sl_pct_risk = risk_per_unit / entry_price
+        except:
+            return # Avoid division by zero if entry_price is somehow 0
 
-    # --- Plotly Charts (with Dark Theme and Enhancements) ---
-    template = 'plotly_dark'
-    
-    # Adaptive Equity Chart
-    equity_fig = go.Figure()
-    equity_fig.add_trace(go.Scatter(
-        x=np.arange(len(equity_curve)), 
-        y=equity_curve, 
-        mode='lines', 
-        name='Account Balance', 
-        line=dict(color='#17becf', width=2)
-    ))
-    if max_dd_start_idx != -1 and max_dd_end_idx != -1 and (max_dd_end_idx > max_dd_start_idx):
-        equity_fig.add_vrect(
-            x0=max_dd_start_idx, x1=max_dd_end_idx,
-            fillcolor="rgba(239, 83, 80, 0.2)", line_width=0,
-            annotation_text=f"Max Drawdown: {max_drawdown_pct:.2f}%", 
-            annotation_position="top left",
-            annotation=dict(font=dict(color='white'))
+        if sl_pct_risk <= 0 or sl_pct_risk > 1: # Sanity check: SL risk should be small and positive
+            return
+
+        # 2. Calculate the maximum position value we are willing to have based on risk
+        #    Position Value * SL% = Risk Amount
+        #    Position Value = Risk Amount / SL%
+        try:
+            max_position_value = risk_amount / sl_pct_risk
+        except:
+            return # Avoid division by zero
+
+        # 3. Calculate the maximum size based on this value and entry price
+        try:
+            max_size = max_position_value / entry_price
+        except:
+            return # Avoid division by zero
+
+        # 4. Use a very conservative fraction of this max size to ensure sufficient margin
+        #    This is key to avoiding "insufficient margin" errors.
+        conservative_fraction = 0.1 # Use 10% of calculated max size
+        final_size = max_size * conservative_fraction
+
+        # 5. Ensure the final size is a valid, positive number
+        if not (final_size > 0 and np.isfinite(final_size)):
+            return
+
+        # 6. Round to a reasonable number of decimals to avoid precision issues
+        final_size = round(final_size, 8)
+
+        # --- End Simplified Size Calculation ---
+
+        # TP = entry + (2 * risk) for 1:2 R/R
+        tp_price = entry_price + (self.rr * risk_per_unit)
+
+        # Place the trade
+        try:
+            # Place the order with the conservative size and SL
+            order = self.buy(size=final_size, sl=sl_price)
+
+            # Store additional trade info in the position object
+            if self.position:
+                self.position.custom_tp = tp_price  # Custom TP attribute
+                self.position.half_taken = False
+                # entry_price is already set by the backtesting framework
+
+        except Exception as e:
+            print(f"Warning: Failed to enter long trade (size={final_size:.8f}, value={final_size*entry_price:.2f}): {type(e).__name__}")
+
+    def _enter_trade_short(self, entry_price):
+        atr_now = float(self.atr.iloc[-1]) if not np.isnan(self.atr.iloc[-1]) else None
+        if atr_now is None:
+            return
+
+        # SL = entry + (2.5 * ATR)
+        sl_price = entry_price + (self.atr_mult * atr_now)
+        
+         # Validate SL calculation
+        if sl_price <= entry_price or sl_price <= 0:
+            return
+            
+        risk_per_unit = sl_price - entry_price
+
+        # Validate risk calculation
+        if risk_per_unit <= 0:
+            return
+
+        # Calculate risk amount
+        risk_amount = self._calculate_risk_amount()
+
+        # Avoid division by zero or negative risk
+        if risk_amount <= 0:
+            return
+
+        # --- Simplified and Robust Size Calculation ---
+        # 1. Estimate the risk percentage based on SL distance
+        try:
+            sl_pct_risk = risk_per_unit / entry_price
+        except:
+            return # Avoid division by zero if entry_price is somehow 0
+
+        if sl_pct_risk <= 0 or sl_pct_risk > 1: # Sanity check
+            return
+
+        # 2. Calculate the maximum position value
+        try:
+            max_position_value = risk_amount / sl_pct_risk
+        except:
+            return # Avoid division by zero
+
+        # 3. Calculate the maximum size
+        try:
+            max_size = max_position_value / entry_price
+        except:
+            return # Avoid division by zero
+
+        # 4. Use a very conservative fraction
+        conservative_fraction = 0.1 # Use 10% of calculated max size
+        final_size = max_size * conservative_fraction
+
+        # 5. Ensure the final size is valid
+        if not (final_size > 0 and np.isfinite(final_size)):
+            return
+
+        # 6. Round
+        final_size = round(final_size, 8)
+
+        # --- End Simplified Size Calculation ---
+
+        # TP = entry - (2 * risk) for 1:2 R/R
+        tp_price = entry_price - (self.rr * risk_per_unit)
+
+        # Place the trade
+        try:
+            # Place the order with the conservative size and SL
+            order = self.sell(size=final_size, sl=sl_price)
+
+            # Store additional trade info
+            if self.position:
+                self.position.custom_tp = tp_price  # Custom TP attribute
+                self.position.half_taken = False
+                # entry_price is already set
+
+        except Exception as e:
+            print(f"Warning: Failed to enter short trade (size={final_size:.8f}, value={final_size*entry_price:.2f}): {type(e).__name__}")
+
+    def on_trade_close(self, trade):
+        # Apply cooldown only for losing trades
+        if hasattr(trade, '_pl') and trade._pl < 0:
+            last_idx = len(self.data.Close) - 1
+            last_ts = self.data.index[last_idx]
+            self.cooldown_until = last_ts + pd.Timedelta(hours=self.cooldown_hours)
+
+# ----------------------
+# Plotting Function (Placeholder - include full function from previous code)
+# ----------------------
+def create_enhanced_plot(df, stats, symbol, results_dir):
+    """Create enhanced plot with trade markers and SL/TP levels"""
+    # Include the full plotting function from the previous working version
+    try:
+        # Extract trade data
+        trades = stats['_trades']
+        if trades.empty:
+            return None
+
+        # Create figure with secondary y-axis for volume
+        fig = make_subplots(
+            rows=2, cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.05,
+            row_heights=[0.7, 0.3],
+            subplot_titles=(f'{symbol} Price Action with Trade Markers', 'Volume')
         )
-    equity_fig.update_layout(
-        title_text='<b>Account Balance Over Time</b>',
-        xaxis_title='Trade/Event Number',
-        yaxis_title='Account Balance (USDT)',
-        template=template,
-        height=500,
-        legend=dict(x=0.01, y=0.99, bordercolor='rgba(255,255,255,0.2)', borderwidth=1)
-    )
 
-    # Monthly PnL Chart
-    monthly_pnl = trades_df.set_index('exit_time')['pnl'].resample('M').sum()
-    monthly_fig = go.Figure(data=[go.Bar(
-        x=monthly_pnl.index.strftime('%Y-%m'), 
-        y=monthly_pnl, 
-        name='Monthly PnL',
-        marker_color=['#28a745' if p > 0 else '#dc3545' for p in monthly_pnl]
-    )])
-    monthly_fig.update_layout(
-        title_text='<b>Monthly Profit & Loss</b>',
-        xaxis_title='Month', 
-        yaxis_title='Total PnL (USDT)',
-        template=template
-    )
-    
-    # --- HTML Tables for Trades ---
-    display_cols = ['id', 'exit_time', 'exit_price', 'pnl', 'qty']
-    winning_trades_df['pnl'] = winning_trades_df['pnl'].round(2)
-    losing_trades_df['pnl'] = losing_trades_df['pnl'].round(2)
-    win_table_html = winning_trades_df[display_cols].to_html(classes='trade-table', index=False)
-    loss_table_html = losing_trades_df[display_cols].to_html(classes='trade-table', index=False)
+        # Add candlestick chart
+        fig.add_trace(
+            go.Candlestick(
+                x=df.index,
+                open=df['Open'],
+                high=df['High'],
+                low=df['Low'],
+                close=df['Close'],
+                name='Price',
+                increasing_line_color='#26a69a',
+                decreasing_line_color='#ef5350'
+            ),
+            row=1, col=1
+        )
 
-    # --- HTML Assembly ---
-    equity_chart_html = equity_fig.to_html(full_html=False, include_plotlyjs='cdn')
-    monthly_chart_html = monthly_fig.to_html(full_html=False, include_plotlyjs=False)
+        # Add Bollinger Bands
+        fig.add_trace(
+            go.Scatter(
+                x=df.index,
+                y=df['Upper'],
+                mode='lines',
+                name='Upper BB',
+                line=dict(color='rgba(100, 100, 200, 0.7)', width=1),
+                hovertemplate='Upper BB: %{y:.4f}<extra></extra>'
+            ),
+            row=1, col=1
+        )
 
-    # Create parameters table
-    params_html = "<h3>Parameters Used</h3><table class='trade-table'>"
-    for key, value in config.items():
-        params_html += f"<tr><td>{key}</td><td>{value}</td></tr>"
-    params_html += "</table>"
+        fig.add_trace(
+            go.Scatter(
+                x=df.index,
+                y=df['Lower'],
+                mode='lines',
+                name='Lower BB',
+                line=dict(color='rgba(100, 100, 200, 0.7)', width=1),
+                hovertemplate='Lower BB: %{y:.4f}<extra></extra>'
+            ),
+            row=1, col=1
+        )
 
-    html_template = f"""
-    <html>
+        fig.add_trace(
+            go.Scatter(
+                x=df.index,
+                y=df['MA'],
+                mode='lines',
+                name='MA',
+                line=dict(color='rgba(200, 200, 100, 0.7)', width=1),
+                hovertemplate='MA: %{y:.4f}<extra></extra>'
+            ),
+            row=1, col=1
+        )
+
+        # Add volume bars
+        colors = ['rgba(44, 160, 44, 0.7)' if df['Close'][i] >= df['Open'][i]
+                 else 'rgba(214, 39, 40, 0.7)' for i in range(len(df))]
+
+        fig.add_trace(
+            go.Bar(
+                x=df.index,
+                y=df['Volume'],
+                name='Volume',
+                marker_color=colors,
+                showlegend=False
+            ),
+            row=2, col=1
+        )
+
+        # Add trade markers
+        long_entries = []
+        short_entries = []
+        exits = []
+        sl_levels = []
+        tp_levels = []
+
+        for _, trade in trades.iterrows():
+            entry_idx = trade['EntryBar']
+            exit_idx = trade['ExitBar']
+
+            if entry_idx < len(df) and exit_idx < len(df):
+                entry_time = df.index[entry_idx]
+                exit_time = df.index[exit_idx]
+                entry_price = trade['EntryPrice']
+                exit_price = trade['ExitPrice']
+
+                # Entry markers
+                if trade['Size'] > 0:  # Long
+                    long_entries.append(dict(
+                        x=entry_time,
+                        y=entry_price,
+                        text=f"LONG<br>Size: {trade['Size']:.4f}<br>Entry: {entry_price:.4f}",
+                        color='green'
+                    ))
+                else:  # Short
+                    short_entries.append(dict(
+                        x=entry_time,
+                        y=entry_price,
+                        text=f"SHORT<br>Size: {abs(trade['Size']):.4f}<br>Entry: {entry_price:.4f}",
+                        color='red'
+                    ))
+
+                # Exit markers
+                exits.append(dict(
+                    x=exit_time,
+                    y=exit_price,
+                    text=f"EXIT<br>P/L: {trade['PnL']:.2f}<br>Return: {trade['ReturnPct']:.2f}%",
+                    color='orange' if trade['PnL'] > 0 else 'purple'
+                ))
+
+                # SL/TP levels (if available)
+                if 'SL' in trade and not np.isnan(trade['SL']):
+                    sl_levels.append(dict(
+                        x=entry_time,
+                        y=trade['SL'],
+                        text=f"SL: {trade['SL']:.4f}",
+                        color='red'
+                    ))
+
+                if 'TP' in trade and not np.isnan(trade['TP']):
+                    tp_levels.append(dict(
+                        x=entry_time,
+                        y=trade['TP'],
+                        text=f"TP: {trade['TP']:.4f}",
+                        color='green'
+                    ))
+
+        # Add entry markers
+        if long_entries:
+            fig.add_trace(
+                go.Scatter(
+                    x=[t['x'] for t in long_entries],
+                    y=[t['y'] for t in long_entries],
+                    mode='markers',
+                    name='Long Entries',
+                    marker=dict(
+                        symbol='triangle-up',
+                        size=12,
+                        color='green',
+                        line=dict(width=2, color='white')
+                    ),
+                    text=[t['text'] for t in long_entries],
+                    hovertemplate='%{text}<extra></extra>'
+                ),
+                row=1, col=1
+            )
+
+        if short_entries:
+            fig.add_trace(
+                go.Scatter(
+                    x=[t['x'] for t in short_entries],
+                    y=[t['y'] for t in short_entries],
+                    mode='markers',
+                    name='Short Entries',
+                    marker=dict(
+                        symbol='triangle-down',
+                        size=12,
+                        color='red',
+                        line=dict(width=2, color='white')
+                    ),
+                    text=[t['text'] for t in short_entries],
+                    hovertemplate='%{text}<extra></extra>'
+                ),
+                row=1, col=1
+            )
+
+        # Add exit markers
+        if exits:
+            fig.add_trace(
+                go.Scatter(
+                    x=[t['x'] for t in exits],
+                    y=[t['y'] for t in exits],
+                    mode='markers',
+                    name='Exits',
+                    marker=dict(
+                        symbol='diamond',
+                        size=10,
+                        color=[t['color'] for t in exits],
+                        line=dict(width=2, color='white')
+                    ),
+                    text=[t['text'] for t in exits],
+                    hovertemplate='%{text}<extra></extra>'
+                ),
+                row=1, col=1
+            )
+
+        # Add SL/TP markers
+        if sl_levels:
+            fig.add_trace(
+                go.Scatter(
+                    x=[t['x'] for t in sl_levels],
+                    y=[t['y'] for t in sl_levels],
+                    mode='markers',
+                    name='Stop Loss',
+                    marker=dict(
+                        symbol='x',
+                        size=8,
+                        color='red'
+                    ),
+                    text=[t['text'] for t in sl_levels],
+                    hovertemplate='%{text}<extra></extra>'
+                ),
+                row=1, col=1
+            )
+
+        if tp_levels:
+            fig.add_trace(
+                go.Scatter(
+                    x=[t['x'] for t in tp_levels],
+                    y=[t['y'] for t in tp_levels],
+                    mode='markers',
+                    name='Take Profit',
+                    marker=dict(
+                        symbol='circle',
+                        size=8,
+                        color='green'
+                    ),
+                    text=[t['text'] for t in tp_levels],
+                    hovertemplate='%{text}<extra></extra>'
+                ),
+                row=1, col=1
+            )
+
+        # Update layout
+        fig.update_layout(
+            title=f'{symbol} - Enhanced Backtest Results<br>' +
+                  f'Return: {stats["Return [%]"]:.2f}% | Trades: {int(stats["# Trades"])} | ' +
+                  f'Win Rate: {stats["Win Rate [%]"]:.1f}% | Max DD: {stats["Max. Drawdown [%]"]:.2f}%',
+            template='plotly_dark',
+            height=800,
+            showlegend=True,
+            xaxis_rangeslider_visible=False,
+            hovermode='x unified'
+        )
+
+        # Update y-axes
+        fig.update_yaxes(title_text="Price", row=1, col=1)
+        fig.update_yaxes(title_text="Volume", row=2, col=1)
+
+        # Save plot
+        plot_path = os.path.join(results_dir, f"{symbol}_enhanced_plot.html")
+        fig.write_html(plot_path)
+        return plot_path
+
+    except Exception as e:
+        print(f"Error creating enhanced plot for {symbol}: {e}")
+        return None
+
+# ----------------------
+# Report Generation (Placeholder - include full function from previous code)
+# ----------------------
+def generate_dark_html_report(results, starting_balance, commission=0.0001):
+    """Generate a single dark-themed HTML report with all details"""
+    # Include the full report generation function from the previous working version
+    if not results:
+        return "<h1>No results to report</h1>"
+
+    res_df = pd.DataFrame(results).set_index('Symbol')
+
+    # Calculate overall metrics
+    total_symbols = len(res_df)
+    total_initial_capital = starting_balance * total_symbols
+    total_final_equity = res_df['Equity Final [$]'].sum()
+    total_profit = total_final_equity - total_initial_capital
+    total_return_pct = ((total_final_equity / total_initial_capital) - 1) * 100 if total_initial_capital > 0 else 0
+    avg_return_pct = res_df['Return [%]'].mean()
+    total_trades = res_df['# Trades'].sum()
+    avg_win_rate = res_df['Win Rate [%]'].mean()
+    max_dd = res_df['Max. Drawdown [%]'].min() if 'Max. Drawdown [%]' in res_df.columns else 0
+    avg_max_dd = res_df['Max. Drawdown [%]'].mean() if 'Max. Drawdown [%]' in res_df.columns else 0
+
+    # Risk metrics
+    profitable_symbols = len(res_df[res_df['Return [%]'] > 0])
+    unprofitable_symbols = len(res_df[res_df['Return [%]'] < 0])
+    break_even_symbols = len(res_df[res_df['Return [%]'] == 0])
+
+    # Sort symbols by performance
+    top_performers = res_df.sort_values('Return [%]', ascending=False).head(10)
+    worst_performers = res_df.sort_values('Return [%]', ascending=True).head(10)
+
+    # Commission info
+    total_commission_paid = res_df['# Trades'].sum() * commission * starting_balance * 2  # Rough estimate
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="en">
     <head>
-        <title>Backtest Report</title>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Backtesting Report</title>
         <style>
             :root {{
-                --bg-color: #1e1e1e; --primary-text: #d4d4d4; --secondary-text: #8c8c8c;
-                --card-bg: #2a2a2a; --border-color: #444; --positive: #28a745; --negative: #dc3545;
-                --link-color: #3794ff;
+                --bg-dark: #1e1e2e;
+                --bg-card: #2d2d44;
+                --text-primary: #e0e0e0;
+                --text-secondary: #a0a0c0;
+                --accent-primary: #bb86fc;
+                --accent-secondary: #03dac6;
+                --success: #4caf50;
+                --warning: #ff9800;
+                --danger: #f44336;
+                --border: #444466;
             }}
-            body {{ 
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-                margin: 0; padding: 20px; background-color: var(--bg-color); color: var(--primary-text);
+
+            body {{
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                background-color: var(--bg-dark);
+                color: var(--text-primary);
+                margin: 0;
+                padding: 20px;
+                line-height: 1.6;
             }}
-            h1, h2, h3 {{ text-align: center; color: var(--primary-text); font-weight: 300; }}
-            h1 {{ font-size: 2.5em; }}
-            h2 {{ font-size: 1.8em; margin-top: 40px; border-bottom: 1px solid var(--border-color); padding-bottom: 10px; }}
-            h3 {{ font-size: 1.4em; text-align: left; margin-top: 30px; margin-bottom: 15px; }}
-            .kpi-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin-bottom: 30px; }}
-            .kpi-box {{ background-color: var(--card-bg); border: 1px solid var(--border-color); border-radius: 8px; padding: 15px; text-align: center; }}
-            .kpi-title {{ font-weight: 500; font-size: 0.9em; color: var(--secondary-text); margin-bottom: 8px; }}
-            .kpi-value {{ font-size: 1.6em; font-weight: 700; }}
-            .positive {{ color: var(--positive); }}
-            .negative {{ color: var(--negative); }}
-            .chart-container {{ background-color: var(--card-bg); padding: 20px; border-radius: 8px; border: 1px solid var(--border-color); margin-bottom: 20px; }}
-            .table-container {{ background-color: var(--card-bg); border-radius: 8px; border: 1px solid var(--border-color); margin-bottom: 20px; overflow-x: auto; padding: 15px; }}
-            .trade-table {{ width: 100%; border-collapse: collapse; }}
-            .trade-table th, .trade-table td {{ border-bottom: 1px solid var(--border-color); padding: 12px 15px; text-align: left; }}
-            .trade-table th {{ background-color: #333; font-weight: 600; }}
-            .trade-table tr:hover {{ background-color: #3c3c3c; }}
+
+            .container {{
+                max-width: 1200px;
+                margin: 0 auto;
+            }}
+
+            header {{
+                text-align: center;
+                padding: 20px 0;
+                border-bottom: 2px solid var(--border);
+                margin-bottom: 30px;
+            }}
+
+            h1, h2, h3 {{
+                color: var(--accent-primary);
+                margin-top: 0;
+            }}
+
+            .summary-cards {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+                gap: 20px;
+                margin-bottom: 30px;
+            }}
+
+            .card {{
+                background: var(--bg-card);
+                border-radius: 10px;
+                padding: 20px;
+                box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+                border: 1px solid var(--border);
+            }}
+
+            .card-title {{
+                font-size: 1rem;
+                color: var(--text-secondary);
+                margin-bottom: 10px;
+            }}
+
+            .card-value {{
+                font-size: 1.8rem;
+                font-weight: bold;
+                margin: 0;
+            }}
+
+            .positive {{
+                color: var(--success);
+            }}
+
+            .negative {{
+                color: var(--danger);
+            }}
+
+            .neutral {{
+                color: var(--warning);
+            }}
+
+            table {{
+                width: 100%;
+                border-collapse: collapse;
+                background: var(--bg-card);
+                border-radius: 10px;
+                overflow: hidden;
+                margin-bottom: 30px;
+            }}
+
+            th, td {{
+                padding: 12px 15px;
+                text-align: left;
+                border-bottom: 1px solid var(--border);
+            }}
+
+            th {{
+                background-color: rgba(187, 134, 252, 0.1);
+                color: var(--accent-primary);
+                font-weight: 600;
+            }}
+
+            tr:hover {{
+                background-color: rgba(255, 255, 255, 0.05);
+            }}
+
+            .section {{
+                margin-bottom: 40px;
+            }}
+
+            .symbol-performance {{
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 20px;
+            }}
+
+            @media (max-width: 768px) {{
+                .symbol-performance {{
+                    grid-template-columns: 1fr;
+                }}
+
+                .summary-cards {{
+                    grid-template-columns: 1fr 1fr;
+                }}
+            }}
+
+            @media (max-width: 480px) {{
+                .summary-cards {{
+                    grid-template-columns: 1fr;
+                }}
+            }}
         </style>
     </head>
     <body>
-        <h1>Strategy Backtest Report</h1>
-        <h2>Key Performance Indicators</h2>
-        <div class="kpi-grid">
-            <div class="kpi-box">
-                <div class="kpi-title">Total Return</div>
-                <div class="kpi-value {'positive' if total_return_pct >= 0 else 'negative'}">{total_return_pct:.2f}%</div>
-            </div>
-            <div class="kpi-box">
-                <div class="kpi-title">Total PnL</div>
-                <div class="kpi-value {'positive' if total_pnl >= 0 else 'negative'}">${total_pnl:,.2f}</div>
-            </div>
-            <div class="kpi-box">
-                <div class="kpi-title">Max Drawdown</div>
-                <div class="kpi-value negative">{max_drawdown_pct:.2f}%</div>
-            </div>
-            <div class="kpi-box">
-                <div class="kpi-title">Win Rate</div>
-                <div class="kpi-value {'positive' if win_rate > 50 else 'negative'}">{win_rate:.2f}%</div>
-            </div>
-            <div class="kpi-box">
-                <div class="kpi-title">Profit Factor</div>
-                <div class="kpi-value {'positive' if profit_factor > 1 else 'negative'}">{profit_factor:.2f}</div>
-            </div>
-            <div class="kpi-box">
-                <div class="kpi-title">Avg Win / Loss</div>
-                <div class="kpi-value {'positive' if risk_reward_ratio > 1 else 'negative'}">{risk_reward_ratio:.2f}</div>
-            </div>
-             <div class="kpi-box">
-                <div class="kpi-title">Total Trades</div>
-                <div class="kpi-value">{total_trades}</div>
-            </div>
-        </div>
+        <div class="container">
+            <header>
+                <h1>📊 Backtesting Report</h1>
+                <p>Strategy: Bollinger Band Limit Orders with Dynamic Risk Management</p>
+            </header>
 
-        <h2>Charts</h2>
-        <div class="chart-container">{equity_chart_html}</div>
-        <div class="chart-container">{monthly_chart_html}</div>
+            <div class="summary-cards">
+                <div class="card">
+                    <div class="card-title">Total Symbols</div>
+                    <h2 class="card-value">{total_symbols}</h2>
+                </div>
+                <div class="card">
+                    <div class="card-title">Total Return</div>
+                    <h2 class="card-value {('positive' if total_return_pct > 0 else 'negative' if total_return_pct < 0 else 'neutral')}">
+                        {total_return_pct:.2f}%
+                    </h2>
+                </div>
+                <div class="card">
+                    <div class="card-title">Total Profit</div>
+                    <h2 class="card-value {('positive' if total_profit > 0 else 'negative' if total_profit < 0 else 'neutral')}">
+                        ${total_profit:.2f}
+                    </h2>
+                </div>
+                <div class="card">
+                    <div class="card-title">Total Trades</div>
+                    <h2 class="card-value">{int(total_trades)}</h2>
+                </div>
+                <div class="card">
+                    <div class="card-title">Avg Win Rate</div>
+                    <h2 class="card-value {('positive' if avg_win_rate > 50 else 'negative')}">
+                        {avg_win_rate:.1f}%
+                    </h2>
+                </div>
+                <div class="card">
+                    <div class="card-title">Avg Max Drawdown</div>
+                    <h2 class="card-value negative">
+                        {avg_max_dd:.2f}%
+                    </h2>
+                </div>
+            </div>
 
-        <h2>Configuration</h2>
-        <div class="table-container">
-            {params_html}
-        </div>
+            <div class="section">
+                <h2>📈 Overall Performance</h2>
+                <table>
+                    <tr>
+                        <th>Metric</th>
+                        <th>Value</th>
+                    </tr>
+                    <tr>
+                        <td>Starting Balance per Symbol</td>
+                        <td>${starting_balance:.2f}</td>
+                    </tr>
+                    <tr>
+                        <td>Total Initial Capital</td>
+                        <td>${total_initial_capital:.2f}</td>
+                    </tr>
+                    <tr>
+                        <td>Total Final Equity</td>
+                        <td>${total_final_equity:.2f}</td>
+                    </tr>
+                    <tr>
+                        <td>Average Return per Symbol</td>
+                        <td>{avg_return_pct:.2f}%</td>
+                    </tr>
+                    <tr>
+                        <td>Profitable Symbols</td>
+                        <td class="positive">{profitable_symbols}</td>
+                    </tr>
+                    <tr>
+                        <td>Unprofitable Symbols</td>
+                        <td class="negative">{unprofitable_symbols}</td>
+                    </tr>
+                    <tr>
+                        <td>Break-even Symbols</td>
+                        <td class="neutral">{break_even_symbols}</td>
+                    </tr>
+                    <tr>
+                        <td>Estimated Commission Paid</td>
+                        <td>${total_commission_paid:.2f}</td>
+                    </tr>
+                </table>
+            </div>
 
-        <h2>Trade History</h2>
-        <div class="table-container">
-            <h3>Winning Trades ({win_count})</h3>
-            {win_table_html}
-        </div>
-        <div class="table-container">
-            <h3>Losing Trades ({loss_count})</h3>
-            {loss_table_html}
+            <div class="symbol-performance">
+                <div class="section">
+                    <h2>🏆 Top Performers</h2>
+                    <table>
+                        <tr>
+                            <th>Symbol</th>
+                            <th>Return %</th>
+                            <th>Trades</th>
+                            <th>Win Rate</th>
+                        </tr>"""
+
+    # Add top performers
+    for idx, row in top_performers.iterrows():
+        win_rate = row['Win Rate [%]'] if 'Win Rate [%]' in row else 0
+        html_content += f"""
+                        <tr>
+                            <td>{idx}</td>
+                            <td class="{'positive' if row['Return [%]'] > 0 else 'negative' if row['Return [%]'] < 0 else 'neutral'}">
+                                {row['Return [%]']:.2f}%
+                            </td>
+                            <td>{int(row['# Trades'])}</td>
+                            <td>{win_rate:.1f}%</td>
+                        </tr>"""
+
+    html_content += f"""
+                    </table>
+                </div>
+
+                <div class="section">
+                    <h2>📉 Worst Performers</h2>
+                    <table>
+                        <tr>
+                            <th>Symbol</th>
+                            <th>Return %</th>
+                            <th>Trades</th>
+                            <th>Win Rate</th>
+                        </tr>"""
+
+    # Add worst performers
+    for idx, row in worst_performers.iterrows():
+        win_rate = row['Win Rate [%]'] if 'Win Rate [%]' in row else 0
+        html_content += f"""
+                        <tr>
+                            <td>{idx}</td>
+                            <td class="{'positive' if row['Return [%]'] > 0 else 'negative' if row['Return [%]'] < 0 else 'neutral'}">
+                                {row['Return [%]']:.2f}%
+                            </td>
+                            <td>{int(row['# Trades'])}</td>
+                            <td>{win_rate:.1f}%</td>
+                        </tr>"""
+
+    html_content += f"""
+                    </table>
+                </div>
+            </div>
+
+            <div class="section">
+                <h2>📋 All Symbol Results</h2>
+                <table>
+                    <tr>
+                        <th>Symbol</th>
+                        <th>Return %</th>
+                        <th>Final Equity</th>
+                        <th># Trades</th>
+                        <th>Win Rate</th>
+                        <th>Max DD %</th>
+                        <th>Profit Factor</th>
+                    </tr>"""
+
+    # Add all symbols
+    for idx, row in res_df.iterrows():
+        win_rate = row['Win Rate [%]'] if 'Win Rate [%]' in row else 0
+        max_dd = row['Max. Drawdown [%]'] if 'Max. Drawdown [%]' in row else 0
+        profit_factor = row['Profit Factor'] if 'Profit Factor' in row else 0
+
+        html_content += f"""
+                    <tr>
+                        <td>{idx}</td>
+                        <td class="{'positive' if row['Return [%]'] > 0 else 'negative' if row['Return [%]'] < 0 else 'neutral'}">
+                            {row['Return [%]']:.2f}%
+                        </td>
+                        <td>${row['Equity Final [$]']:.2f}</td>
+                        <td>{int(row['# Trades'])}</td>
+                        <td>{win_rate:.1f}%</td>
+                        <td class="negative">{max_dd:.2f}%</td>
+                        <td>{profit_factor:.2f}</td>
+                    </tr>"""
+
+    html_content += f"""
+                </table>
+            </div>
+
+            <footer style="text-align: center; padding: 20px; color: var(--text-secondary); border-top: 1px solid var(--border); margin-top: 30px;">
+                <p>Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+                <p>Strategy: Bollinger Band Limit Orders with Dynamic Risk Management</p>
+            </footer>
         </div>
     </body>
-    </html>
-    """
-    
-    with open(filename, 'w', encoding='utf-8') as f:
-        f.write(html_template)
-    log.info("Report generated successfully.")
+    </html>"""
 
-def run_manual_mode(config, historical_df):
-    """
-    Runs the backtester in manual mode with a single configuration.
-    """
-    log.info("--- Starting Manual Mode ---")
-    
-    # Run the backtest
-    backtest_results = run_backtest(config, historical_df)
-
-    # Generate the final report
-    if backtest_results:
-        generate_html_report(backtest_results, config, "manual_backtest_report.html")
+    return html_content
 
 
-def run_auto_mode(base_config, historical_df):
-    """
-    Runs the backtester in auto-optimization mode, trying different parameter combinations.
-    """
-    import itertools
-    import copy
+# ----------------------
+# Main: downloader + backtests
+# ----------------------
 
-    log.info("--- Starting Auto-Optimization Mode ---")
+def main():
+    print("=== Binance Data Downloader + Backtester ===")
 
-    param_grid = {
-        'KAMA_LENGTH': [10, 14, 20],
-        'ADX_THRESHOLD': [25, 30, 35],
-        'CHOP_THRESHOLD': [55, 60, 65],
-        'SL_TP_ATR_MULT': [2.0, 2.5, 3.0]
-    }
-    
-    keys, values = zip(*param_grid.items())
-    param_combinations = [dict(zip(keys, v)) for v in itertools.product(*values)]
-    
-    print(f"Generated {len(param_combinations)} parameter combinations to test.")
-    
-    all_results = []
-    
-    for i, params in enumerate(param_combinations):
-        run_config = copy.deepcopy(base_config)
-        run_config.update(params)
-        
-        print("-" * 70)
-        print(f"--> Running Test {i+1}/{len(param_combinations)} | Params: {params}")
-        
-        results = run_backtest(run_config, historical_df.copy())
-        
-        if results and results['closed_trades']:
-            trades_df = pd.DataFrame(results['closed_trades'])
-            final_equity = run_config['INITIAL_CAPITAL'] + trades_df['pnl'].sum()
-            total_trades = len(trades_df)
-            win_rate = (len(trades_df[trades_df['pnl'] > 0]) / total_trades) * 100 if total_trades > 0 else 0
-        else:
-            final_equity = run_config['INITIAL_CAPITAL']
-            total_trades = 0
-            win_rate = 0
-        
-        print(f"<-- Result: Final Equity ${final_equity:,.2f} | Trades: {total_trades} | Win Rate: {win_rate:.1f}%")
-            
-        all_results.append({
-            'params': params,
-            'final_equity': final_equity,
-            'total_trades': total_trades,
-            'win_rate': win_rate,
-            'config': run_config
-        })
+    existing_env = {}
+    if os.path.exists(ENV_FILE):
+        with open(ENV_FILE, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                if '=' in line:
+                    k,v = line.split('=',1)
+                    existing_env[k.strip()] = v.strip()
 
-    if not all_results:
-        log.error("No results from any optimization run. Exiting.")
+    api_key = existing_env.get('BINANCE_API_KEY') or input('Enter your BINANCE_API_KEY (leave blank to skip): ').strip()
+    api_secret = existing_env.get('BINANCE_API_SECRET') or input('Enter your BINANCE_API_SECRET (leave blank to skip): ').strip()
+
+    symbols = FIXED_SYMBOLS
+    print(f"Using fixed symbol list with {len(symbols)} symbols.")
+
+    # prompt for day count and starting balance
+    while True:
+        days_input = input('How many past days of data to download per symbol? (e.g. 7): ').strip()
+        try:
+            days = int(days_input)
+            if days <= 0:
+                raise ValueError()
+            break
+        except Exception:
+            print('Please enter a positive integer for days.')
+
+    while True:
+        bal_input = input('Enter starting balance (e.g. 10000): ').strip()
+        try:
+            starting_balance = float(bal_input)
+            if starting_balance <= 0:
+                 print('Please enter a positive starting balance.')
+                 continue
+            break
+        except Exception:
+            print('Please enter a numeric starting balance.')
+
+    write_env(api_key, api_secret, symbols, starting_balance, days)
+
+    interval = input(f"Interval to download (e.g. {DEFAULT_INTERVAL}): ").strip() or DEFAULT_INTERVAL
+    if interval not in INTERVAL_MS:
+        print(f"Interval {interval} not supported. Supported intervals: {', '.join(list(INTERVAL_MS.keys()))}")
         return
 
-    sorted_results = sorted(all_results, key=lambda x: x['final_equity'], reverse=True)
-    
-    print("\n" + "="*70)
-    print("--- Optimization Complete ---")
-    print(f"Finished running {len(param_combinations)} parameter sets.")
-    print("\n--- Top 10 Performing Parameter Sets ---")
-
-    top_ten = sorted_results[:10]
-    print(f"{'Rank':<5} | {'Final Equity':<15} | {'Trades':<7} | {'Win Rate':<10} | {'Parameters'}")
-    print("-" * 80)
-    for i, result in enumerate(top_ten):
-        rank = i + 1
-        equity_str = f"${result['final_equity']:,.2f}"
-        win_rate_str = f"{result['win_rate']:.1f}%"
-        print(f"{rank:<5} | {equity_str:<15} | {result['total_trades']:<7} | {win_rate_str:<10} | {result['params']}")
-    print("="*70)
-    
-    top_three = sorted_results[:3]
-    for i, result in enumerate(top_three):
-        rank = i + 1
-        log.info(f"Re-running backtest for Rank #{rank} to generate detailed report...")
-        final_run_config = result['config']
-        final_run_results = run_backtest(final_run_config, historical_df.copy())
-        
-        if final_run_results:
-            report_filename = f"optimization_report_rank_{rank}.html"
-            generate_html_report(final_run_results, final_run_config, report_filename)
-
-if __name__ == '__main__':
-    log.info("Backtester starting up.")
-    CONFIG = setup_config()
-    log.info("Loaded configuration.")
-
-    # --- Get Initial Capital from User ---
-    while True:
+    print("Beginning downloads... (this may take a while)")
+    downloaded = []
+    for idx, sym in enumerate(symbols, start=1):
         try:
-            capital_input = input(f"Enter initial capital (or press Enter for default ${CONFIG['INITIAL_CAPITAL']}): ")
-            if not capital_input:
-                break # Keep default
-            user_capital = float(capital_input)
-            if user_capital <= 0:
-                print("Please enter a positive value for the capital.")
-                continue
-            CONFIG['INITIAL_CAPITAL'] = user_capital
-            break
-        except ValueError:
-            print("Invalid input. Please enter a number.")
-        except (KeyboardInterrupt, EOFError):
-            log.info("\nExiting.")
-            sys.exit(0)
-            
-    log.info(f"Starting backtest with initial capital of ${CONFIG['INITIAL_CAPITAL']:,.2f}")
-
-    DATA_FILE = "historical_data.parquet"
-    
-    if os.path.exists(DATA_FILE):
-        log.info(f"Loading historical data from {DATA_FILE}...")
-        historical_df = pd.read_parquet(DATA_FILE)
-        log.info(f"Loaded {len(historical_df)} k-lines from local file.")
-    else:
-        log.info("Historical data file not found.")
-        client = init_binance_client()
-        historical_df = download_historical_data(client, CONFIG, DATA_FILE)
-        fetch_and_cache_exchange_info(client)
-
-    # --- Mode Selection ---
-    while True:
-        print("\n--- Select Run Mode ---")
-        print("1: Manual Mode (run once with config.json)")
-        print("2: Auto-Optimization Mode (find best parameters)")
-        
-        try:
-            choice = input("Enter your choice (1 or 2): ")
-            if choice == '1':
-                run_manual_mode(CONFIG, historical_df)
-                break
-            elif choice == '2':
-                run_auto_mode(CONFIG, historical_df.copy())
-                break
-            else:
-                print("Invalid choice. Please enter 1 or 2.")
-        except (KeyboardInterrupt, EOFError):
-            log.info("\nExiting.")
+            print(f"[{idx}/{len(symbols)}] -> {sym}")
+            path = download_klines(sym, interval, days)
+            if path:
+                downloaded.append(path)
+        except KeyboardInterrupt:
+            print('Interrupted by user, stopping downloads.')
             break
         except Exception as e:
-            log.error(f"An unhandled error occurred: {e}")
-            log.error("--- Full Traceback ---")
-            traceback.print_exc()
-            log.error("--- End Traceback ---")
-            break
+            print(f"Error downloading {sym}: {e}")
+            time.sleep(1)
 
-    log.info("Backtest script finished.")
+    print('Done. Downloaded files:')
+    for p in downloaded:
+        print('  ', p)
+
+    # Run backtests (if backtesting available)
+    if Backtest is None:
+        print('\nWARNING: backtesting.py not installed. To run backtests, install with: pip install backtesting plotly')
+        print('All finished.')
+        return
+
+    results = []
+    results_dir = 'results'
+    os.makedirs(results_dir, exist_ok=True)
+    print('\nStarting backtests on downloaded files...')
+    print('Using fixed 10x leverage (margin=0.1) for all symbols.')
+
+    for path in downloaded:
+        try:
+            sym = os.path.basename(path).split('_')[0]
+            print(f'\n--- Backtest: {sym} ---')
+            df = pd.read_csv(path, parse_dates=['OpenTime'])
+            df = df.rename(columns={
+                'OpenTime': 'Date',
+                'Open': 'Open',
+                'High': 'High',
+                'Low': 'Low',
+                'Close': 'Close',
+                'Volume': 'Volume'
+            })
+            df = df.set_index('Date')
+            # ensure numeric
+            for c in ['Open','High','Low','Close','Volume']:
+                df[c] = pd.to_numeric(df[c], errors='coerce')
+
+            # Add indicators to dataframe for plotting
+            ma, upper, lower = bollinger_bands(df['Close'], 20, 2.0)
+            df['MA'] = ma
+            df['Upper'] = upper
+            df['Lower'] = lower
+
+            # --- FIXED LEVERAGE ---
+            # Run backtest with 0.01% commission (0.0001), FIXED 10x leverage (margin=0.1)
+            bt = Backtest(df, BollingerLimitV2, cash=starting_balance, commission=0.0001,
+                         trade_on_close=False, exclusive_orders=True, margin=0.1) # 10x leverage
+            stats = bt.run()
+
+            print_stats = {
+                'Return [%]': stats.get('Return [%]', 0),
+                'Equity Final [$]': stats.get('Equity Final [$]', starting_balance),
+                '# Trades': stats.get('# Trades', 0),
+                'Win Rate [%]': stats.get('Win Rate [%]', 0),
+                'Max. Drawdown [%]': stats.get('Max. Drawdown [%]', 0),
+                'Profit Factor': stats.get('Profit Factor', 1)
+            }
+
+            print(f"Return [%]: {print_stats['Return [%]']:.2f} | Equity Final [$]: {print_stats['Equity Final [$]']:.2f} | # Trades: {int(print_stats['# Trades'])} | Win Rate [%]: {print_stats['Win Rate [%]']:.2f} | Max DD [%]: {print_stats['Max. Drawdown [%]']:.2f}")
+
+            # Create enhanced plot with trade markers (only if trades occurred)
+            if int(print_stats['# Trades']) > 0:
+                plot_path = create_enhanced_plot(df, stats, sym, results_dir)
+                if plot_path:
+                    print(f"Saved enhanced plot to {plot_path}")
+            else:
+                print("No trades executed, skipping plot generation.")
+
+            sdict = {k: stats[k] for k in stats.index}
+            sdict['Symbol'] = sym
+            results.append(sdict)
+
+        except Exception as e:
+            print(f"Backtest failed for {path}: {e}")
+
+    if results:
+        # Generate HTML report
+        html_report = generate_dark_html_report(results, starting_balance, commission=0.0001)
+        report_path = os.path.join(results_dir, 'backtest_report.html')
+
+        with open(report_path, 'w', encoding='utf-8') as f:
+            f.write(html_report)
+
+        print(f'\nSaved comprehensive HTML report to {report_path}')
+
+        # Save CSV summary
+        res_df = pd.DataFrame(results).set_index('Symbol')
+        summary_path = os.path.join(results_dir, 'backtests_summary.csv')
+        res_df.to_csv(summary_path)
+        print(f'Saved CSV summary to {summary_path}')
+
+    print('All finished.')
+
+if __name__ == '__main__':
+    main()
