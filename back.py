@@ -10,60 +10,29 @@ import matplotlib.pyplot as plt
 # --- Configuration ---
 config = {
     'tld': 'com',
-    'min_trade_value_override': None,
-    'risk_pct': 0.02,
-    'min_risk_amount': 0.5,
-    'entry_threshold': 3.4,
+    'min_trade_value_override': 0.5,
+    'enforce_max_position_value': True,
+    'max_position_value_pct': 0.40,   # never more than 40% of account in any single position
+    'risk_pct': 0.015,                # 1.5% of balance (small)
+    'min_risk_amount': 0.02,          # absolute floor USD (tiny)
+    'max_risk_per_trade': 1.0,        # absolute USD cap
+    'entry_threshold': 4.2,
+    'sniper_threshold_delta': 1.4,
     'require_htf_score': True,
     'require_momentum': True,
     'commission': 0.0006,
-    'slippage': 0.0005,
+    'slippage': 0.0010,
     'cooldown_period_hours': 3,
-
-    'htf_market_structure': {
-        'lookback': 60,
-        'atr_period': 60,
-        'atr_mult': 1.2,
-        'score_threshold': 0.45,
-    },
-
-    'order_blocks': {
-        'atr_period': 20,
-        'impulse_mult': 1.5,
-        'max_width_mult': 3.0,
-        'strength_threshold': 0.35,
-    },
-
-    'fair_value_gaps': {'strength_threshold': 0.35},
-
-    'liquidity_sweep': {'lookback': 30, 'atr_period': 20, 'atr_mult': 0.7},
-
-    'momentum_filter': {'consecutive_candles': 3, 'ratio_min': 0.7, 'ratio_max': 1.7, 'score_divisor': 1.0},
-
-    'entry_planning': {
-        'min_sl_dist_pct': 0.002,
-        'tp1_rr': 0.9,
-        'tp2_rr': 1.8,
-        'buffer_atr_mult': 1.5,
-        'buffer_price_pct': 0.0025,
-    },
-
-    'trailing_stop': {'breakeven_dist_mult': 1.05, 'trail_dist_atr_mult': 0.7},
-
-    'weights': {
-        'htf_market_bias': 1.8,
-        'order_block': 2.0,
-        'fvg': 1.6,
-        'liquidity_sweep': 1.2,
-        'ote': 0.6,
-        'breaker': 0.6,
-        'vwap_hvn': 0.6,
-        'momentum': 1.4,
-        'candle_body_confirm': 1.2,
-        'session_spread': 0.4,
-    }
+    'htf_market_structure': {'lookback': 60, 'atr_period': 60, 'atr_mult':1.2, 'score_threshold':0.55},
+    'order_blocks': {'atr_period':20, 'impulse_mult':1.5, 'max_width_mult':3.0, 'strength_threshold':0.50},
+    'fair_value_gaps': {'strength_threshold':0.45},
+    'liquidity_sweep': {'lookback':20, 'atr_period':14, 'atr_mult':0.6},
+    'momentum_filter': {'consecutive_candles':3, 'ratio_min':0.8, 'ratio_max':1.7, 'score_divisor':0.9},
+    'entry_planning': {'min_sl_dist_pct':0.003, 'max_sl_pct':0.03, 'tp1_rr':0.9, 'tp2_rr':1.8, 'buffer_atr_mult':2.0, 'buffer_price_pct':0.003},
+    'trailing_stop': {'breakeven_dist_mult':1.05, 'trail_dist_atr_mult':0.7},
+    'micro_sniper_trigger': {'lookback':24, 'wick_atr_mult':0.25, 'volume_z_k':1.5, 'atr_period':14},
+    'weights': {'htf_market_bias':2.0,'order_block':2.2,'fvg':1.6,'liquidity_sweep':1.2,'ote':0.4,'breaker':0.6,'vwap_hvn':0.4,'momentum':1.8,'candle_body_confirm':1.6,'session_spread':0.4,'micro_sniper_trigger':3.5}
 }
-
 
 
 
@@ -164,7 +133,7 @@ class Backtester:
     A class to run a vectorized backtest for a given trading strategy.
     It handles data loading, trade execution simulation, risk management, and performance reporting.
     """
-    def __init__(self, symbol, start_date, end_date, initial_capital, data_5m, data_15m, data_1h, config):
+    def __init__(self, symbol, start_date, end_date, initial_capital, data_1m, data_5m, data_15m, data_1h, config):
         self.symbol = symbol
         self.start_date = start_date
         self.end_date = end_date
@@ -179,7 +148,7 @@ class Backtester:
         self.entry_threshold = config['entry_threshold']
         self.require_htf_score = config['require_htf_score']
         self.require_momentum = config['require_momentum']
-        self.data_5m, self.data_15m, self.data_1h = data_5m, data_15m, data_1h
+        self.data_1m, self.data_5m, self.data_15m, self.data_1h = data_1m, data_5m, data_15m, data_1h
         if not self.data_15m.empty: self.data_15m['atr'] = atr(self.data_15m, self.config['order_blocks']['atr_period'])
         self.symbol_info = get_symbol_info_once(self.symbol, self.config.get('tld', 'com'))
         self.step_size = get_step_size(self.symbol, self.symbol_info)
@@ -218,14 +187,22 @@ class Backtester:
         return balance_before, balance_after
 
     def calculate_risk_amount(self):
-        """Calculates the amount to risk on a trade based on the current balance."""
-        risk_pct = self.config.get('risk_pct', 0.02)
-        min_risk = self.config.get('min_risk_amount', 0.5)
+        """
+        Calculates the amount to risk on a trade based on a hybrid rule:
+        - Use a percentage of the balance.
+        - Enforce an absolute minimum risk amount (floor).
+        - Enforce an absolute maximum risk amount (cap).
+        This makes the strategy viable for very small accounts.
+        """
+        base_risk_pct = self.config.get('risk_pct', 0.01)
+        absolute_floor = self.config.get('min_risk_amount', 0.05)
+        max_risk = self.config.get('max_risk_per_trade', 0.25)
         
-        if self.balance * risk_pct < min_risk:
-            return min_risk
-        else:
-            return self.balance * risk_pct
+        # Calculate risk based on percentage, but not less than the floor
+        dynamic_risk = max(absolute_floor, self.balance * base_risk_pct)
+        
+        # The final risk amount is capped by the maximum allowed risk per trade
+        return min(dynamic_risk, max_risk)
 
     def calculate_position_size(self, entry_price, sl_price):
         """Calculates the position size based on risk amount and stop loss distance."""
@@ -354,7 +331,11 @@ class Backtester:
             print("No trades were executed."); return
 
         trades_df = pd.DataFrame(self.trades)
-        if 'close_time' in trades_df.columns:
+        # prefer exit_time if present
+        if 'exit_time' in trades_df.columns:
+            trades_df['exit_time'] = pd.to_datetime(trades_df['exit_time'])
+            trades_df.set_index('exit_time', inplace=True)
+        elif 'close_time' in trades_df.columns:
             trades_df['close_time'] = pd.to_datetime(trades_df['close_time'])
             trades_df.set_index('close_time', inplace=True)
 
@@ -434,12 +415,19 @@ class Backtester:
     def run(self):
         """Runs the main backtesting loop."""
         print("Running backtest...");
-        if self.data_5m.empty: return
+        if self.data_1m.empty or self.data_5m.empty: return
         for i in range(1, len(self.data_5m)):
             self.current_time = self.data_5m.index[i]
             if self.position: self.manage_position(); continue
-            hist_5m, hist_15m, hist_1h = self.data_5m.iloc[:i+1], self.data_15m[self.data_15m.index <= self.current_time], self.data_1h[self.data_1h.index <= self.current_time]
-            if len(hist_1h) < 60 or len(hist_15m) < 110 or len(hist_5m) < 70: continue
+            
+            # Prepare historical data for all timeframes
+            hist_1m = self.data_1m[self.data_1m.index <= self.current_time]
+            hist_5m = self.data_5m.iloc[:i+1]
+            hist_15m = self.data_15m[self.data_15m.index <= self.current_time]
+            hist_1h = self.data_1h[self.data_1h.index <= self.current_time]
+
+            # Ensure we have enough data to run indicators
+            if len(hist_1h) < 60 or len(hist_15m) < 110 or len(hist_5m) < 70 or len(hist_1m) < 70: continue
             
             detection_results = {}
             htf_market_bias = detect_htf_market_structure(hist_1h, **self.config['htf_market_structure'])
@@ -463,7 +451,8 @@ class Backtester:
                 'vwap_hvn': institutional_imbalance_vwap(hist_15m),
                 'momentum': momentum_volume_filter(hist_5m, '5m', **self.config['momentum_filter']),
                 'candle_body_confirm': candle_body_confirmation(hist_5m.iloc[-1], zone, side),
-                'session_spread': session_and_spread_filter(self.current_time)
+                'session_spread': session_and_spread_filter(),
+                'micro_sniper_trigger': micro_sniper_trigger(hist_1m, **self.config['micro_sniper_trigger'])
             })
             
             confluence_results = compute_confluence_score(detection_results, self.config['weights'])
@@ -494,11 +483,32 @@ class Backtester:
 
             # Candidate logging
             reject_reasons = []
-            if composite_score < self.entry_threshold:
-                reject_reasons.append('score_too_low')
+
+            # Dynamic entry threshold for sniper trades
+            current_entry_threshold = self.entry_threshold
+            sniper_result = detection_results.get('micro_sniper_trigger', {})
+            htf_side = detection_results.get('htf_market_bias', {}).get('side')
+
+            is_strong_sniper = sniper_result.get('score', 0) > 0.6
+            is_aligned_with_htf = htf_side == sniper_result.get('side') and htf_side != 'neutral'
+
+            if is_strong_sniper and is_aligned_with_htf:
+                delta = self.config.get('sniper_threshold_delta', 1.0)
+                current_entry_threshold -= delta
+                print(f"[{self.current_time}] INFO: Sniper override active. Threshold lowered to {current_entry_threshold:.2f}")
+
+            if composite_score < current_entry_threshold:
+                reject_reasons.append(f'score_too_low (score: {composite_score:.2f}, threshold: {current_entry_threshold:.2f})')
 
             # Calculate planned position size and value
-            plan = plan_entry_action(self.symbol, side, composite_score, detection_results, hist_5m.iloc[-1]['close'], self.data_15m.asof(self.current_time)['atr'], self.config['entry_planning'])
+            atr_row = self.data_15m.asof(self.current_time)
+            atr_15m = atr_row['atr'] if isinstance(atr_row, pd.Series) and pd.notna(atr_row.get('atr', np.nan)) else None
+            if atr_15m is None:
+                # If ATR is not available, we cannot plan a trade that depends on it.
+                print(f"[{self.current_time}] WARN: Could not get 15m ATR for {self.symbol}. Skipping candidate.")
+                continue
+            
+            plan = plan_entry_action(self.symbol, side, composite_score, detection_results, hist_5m.iloc[-1]['close'], atr_15m, self.config['entry_planning'])
             
             if not plan or 'entry_price' not in plan or 'stop_loss' not in plan:
                 print(f"[{self.current_time}] ERROR: plan_entry_action returned invalid plan: {plan}")
@@ -563,8 +573,9 @@ def generate_consolidated_report(all_trades, initial_capital, final_balance):
     
     # Create a DataFrame from all trades
     trades_df = pd.DataFrame(all_trades)
-    trades_df['exit_time'] = pd.to_datetime(trades_df['exit_time'])
-    trades_df.sort_values(by='exit_time', inplace=True)
+    if 'exit_time' in trades_df.columns:
+        trades_df['exit_time'] = pd.to_datetime(trades_df['exit_time'])
+        trades_df.sort_values(by='exit_time', inplace=True)
     
     # Save all trades to CSV
     trades_df.to_csv('all_trade_details.csv', index=False)
@@ -646,10 +657,11 @@ if __name__ == "__main__":
     5.  The backtest report and PnL curve chart will be generated for each symbol.
     """
     # --- Configuration ---
+    # For this test run, we use a single symbol and a very short date range to speed up verification.
     symbols_to_test = os.getenv("SYMBOLS", "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,TRXUSDT,TONUSDT,LTCUSDT,AAVEUSDT").split(',')
-    start_date_str = "2024-04-01"
-    end_date_str = "2024-05-01"
-    initial_capital = 100.0
+    start_date_str = "2025-08-30"
+    end_date_str = "2025-09-06"
+    initial_capital = 10.0
     
     print("Backtesting framework starting...")
     
@@ -659,7 +671,7 @@ if __name__ == "__main__":
     for symbol_to_test in symbols_to_test:
         print(f"--- Running backtest for {symbol_to_test} ---")
         print("Ensuring data is available...")
-        data_to_load = {f'data_{tf}': fetch_and_cache_data(symbol_to_test, tf, start_date_str, end_date_str, config.get('tld', 'com')) for tf in ['5m', '15m', '1h']}
+        data_to_load = {f'data_{tf}': fetch_and_cache_data(symbol_to_test, tf, start_date_str, end_date_str, config.get('tld', 'com')) for tf in ['1m', '5m', '15m', '1h']}
         if not any(df.empty for df in data_to_load.values()):
             backtester = Backtester(symbol_to_test, start_date_str, end_date_str, final_balance, **data_to_load, config=config)
             final_balance = backtester.run()
