@@ -9,29 +9,32 @@ import matplotlib.pyplot as plt
 
 # --- Configuration ---
 config = {
-    'tld': 'com',
-    'min_trade_value_override': 0.5,
-    'enforce_max_position_value': True,
+    'tld': 'us',
+    'min_trade_value_override': 1.0,
+    'enforce_max_position_value': False,
     'max_position_value_pct': 0.40,   # never more than 40% of account in any single position
-    'risk_pct': 0.015,                # 1.5% of balance (small)
+    'risk_pct': 0.02,                # 1.5% of balance (small)
     'min_risk_amount': 0.02,          # absolute floor USD (tiny)
-    'max_risk_per_trade': 1.0,        # absolute USD cap
-    'entry_threshold': 4.2,
-    'sniper_threshold_delta': 1.4,
+    'max_risk_per_trade': 0.5,        # absolute USD cap
+    'entry_threshold': 3.0,
+    'sniper_threshold_delta': 2.0,
+    'soft_penalty': 0.3,
     'require_htf_score': True,
     'require_momentum': True,
     'commission': 0.0006,
     'slippage': 0.0010,
+    'spread_pct_random_range': (0.0002, 0.0008), # Simulate variable spread between 0.02% and 0.08%
     'cooldown_period_hours': 3,
-    'htf_market_structure': {'lookback': 60, 'atr_period': 60, 'atr_mult':1.2, 'score_threshold':0.55},
-    'order_blocks': {'atr_period':20, 'impulse_mult':1.5, 'max_width_mult':3.0, 'strength_threshold':0.50},
-    'fair_value_gaps': {'strength_threshold':0.45},
+    'htf_market_structure': {'lookback': 100, 'atr_period': 60, 'atr_mult':1.2, 'score_threshold':0.45},
+    'order_blocks': {'atr_period':20, 'impulse_mult':1.5, 'max_width_mult':3.0, 'strength_threshold':0.4},
+    'fair_value_gaps': {'strength_threshold':0.4},
     'liquidity_sweep': {'lookback':20, 'atr_period':14, 'atr_mult':0.6},
-    'momentum_filter': {'consecutive_candles':3, 'ratio_min':0.8, 'ratio_max':1.7, 'score_divisor':0.9},
-    'entry_planning': {'min_sl_dist_pct':0.003, 'max_sl_pct':0.03, 'tp1_rr':0.9, 'tp2_rr':1.8, 'buffer_atr_mult':2.0, 'buffer_price_pct':0.003},
-    'trailing_stop': {'breakeven_dist_mult':1.05, 'trail_dist_atr_mult':0.7},
+    'momentum_filter': {'consecutive_candles':4, 'ratio_min':0.8, 'ratio_max':1.7, 'score_divisor':0.9},
+    'entry_planning': {'min_sl_dist_pct':0.003, 'max_sl_pct':0.02, 'tp1_rr':0.7, 'tp2_rr':1.8, 'buffer_atr_mult':2.0, 'buffer_price_pct':0.003},
+    'trailing_stop': {'breakeven_dist_mult':1.05, 'trail_dist_atr_mult':0.5},
     'micro_sniper_trigger': {'lookback':24, 'wick_atr_mult':0.25, 'volume_z_k':1.5, 'atr_period':14},
-    'weights': {'htf_market_bias':2.0,'order_block':2.2,'fvg':1.6,'liquidity_sweep':1.2,'ote':0.4,'breaker':0.6,'vwap_hvn':0.4,'momentum':1.8,'candle_body_confirm':1.6,'session_spread':0.4,'micro_sniper_trigger':3.5}
+    'correlation_check': {'enabled': True, 'threshold': 0.85, 'lookback_candles': 100},
+    'weights': {'htf_market_bias':2.5,'order_block':2.2,'fvg':1.6,'liquidity_sweep':1.2,'ote':0.4,'breaker':1.2,'vwap_hvn':0.4,'momentum':2.2,'candle_body_confirm':1.6,'session_spread':0.4,'micro_sniper_trigger':2.0}
 }
 
 
@@ -133,7 +136,7 @@ class Backtester:
     A class to run a vectorized backtest for a given trading strategy.
     It handles data loading, trade execution simulation, risk management, and performance reporting.
     """
-    def __init__(self, symbol, start_date, end_date, initial_capital, data_1m, data_5m, data_15m, data_1h, config):
+    def __init__(self, symbol, start_date, end_date, initial_capital, data_1m, data_5m, data_15m, data_1h, config, all_trades=None, all_data=None):
         self.symbol = symbol
         self.start_date = start_date
         self.end_date = end_date
@@ -141,6 +144,8 @@ class Backtester:
         self.balance = initial_capital
         self.position = None
         self.trades = []
+        self.all_trades = all_trades if all_trades is not None else []
+        self.all_data = all_data if all_data is not None else {}
         self.ledger = []
         self.candidates = []
         self.config = config
@@ -148,6 +153,7 @@ class Backtester:
         self.entry_threshold = config['entry_threshold']
         self.require_htf_score = config['require_htf_score']
         self.require_momentum = config['require_momentum']
+        self.consecutive_losses = 0
         self.data_1m, self.data_5m, self.data_15m, self.data_1h = data_1m, data_5m, data_15m, data_1h
         if not self.data_15m.empty: self.data_15m['atr'] = atr(self.data_15m, self.config['order_blocks']['atr_period'])
         self.symbol_info = get_symbol_info_once(self.symbol, self.config.get('tld', 'com'))
@@ -186,6 +192,12 @@ class Backtester:
         print(f"[{timestamp}] BALANCE UPDATE | Amount: {net_pnl:.2f} | New Balance: {self.balance:.2f} | Desc: {description}")
         return balance_before, balance_after
 
+    def get_random_spread_pct(self):
+        if 'spread_pct_random_range' in self.config:
+            min_spread, max_spread = self.config['spread_pct_random_range']
+            return np.random.uniform(min_spread, max_spread)
+        return self.config.get('spread_pct', 0.0)
+
     def calculate_risk_amount(self):
         """
         Calculates the amount to risk on a trade based on a hybrid rule:
@@ -202,7 +214,12 @@ class Backtester:
         dynamic_risk = max(absolute_floor, self.balance * base_risk_pct)
         
         # The final risk amount is capped by the maximum allowed risk per trade
-        return min(dynamic_risk, max_risk)
+        risk_amount = min(dynamic_risk, max_risk)
+
+        if self.consecutive_losses >= 2:
+            risk_amount /= 2
+        
+        return risk_amount
 
     def calculate_position_size(self, entry_price, sl_price):
         """Calculates the position size based on risk amount and stop loss distance."""
@@ -221,7 +238,10 @@ class Backtester:
             ob_key = (order_block['origin_idx'], tuple(order_block['zone']))
             self.ob_cooldown[ob_key] = self.current_time
 
+        spread_pct = self.get_random_spread_pct()
+        spread = entry_price * spread_pct
         entry_price_after_slippage = entry_price + (entry_price * self.config.get('slippage', 0.0)) if side == 'buy' else entry_price - (entry_price * self.config.get('slippage', 0.0))
+        entry_price_after_slippage += spread / 2
         
         notional_value = size * entry_price_after_slippage
         commission_open = notional_value * self.commission
@@ -266,7 +286,8 @@ class Backtester:
                    (self.position['side'] == 'sell' and (self.position['entry_price'] - candle['low']) >= self.config['trailing_stop']['breakeven_dist_mult'] * tp1_dist):
                     self.position['sl'] = self.position['entry_price']; self.position['be_moved'] = True
         if not self.position['trailing_active']:
-            if (self.position['side'] == 'buy' and candle['high'] >= self.position['tp1']) or (self.position['side'] == 'sell' and candle['low'] <= self.position['tp1']):
+            if (self.position['side'] == 'buy' and (candle['high'] - self.position['entry_price']) >= (abs(self.position['tp1'] - self.position['entry_price']) * 0.5)) or \
+               (self.position['side'] == 'sell' and (self.position['entry_price'] - candle['low']) >= (abs(self.position['tp1'] - self.position['entry_price']) * 0.5)):
                 self.position['trailing_active'] = True
         if self.position['trailing_active']:
             atr_15m = self.data_15m.asof(self.current_time)['atr']
@@ -284,7 +305,10 @@ class Backtester:
         if not self.position:
             return
 
+        spread_pct = self.get_random_spread_pct()
+        spread = exit_price * spread_pct
         exit_price_after_slippage = exit_price - (exit_price * self.config.get('slippage', 0.0)) if self.position['side'] == 'buy' else exit_price + (exit_price * self.config.get('slippage', 0.0))
+        exit_price_after_slippage -= spread / 2
 
         gross_pnl = (exit_price_after_slippage - self.position['entry_price']) * self.position['size'] if self.position['side'] == 'buy' else (self.position['entry_price'] - exit_price_after_slippage) * self.position['size']
         
@@ -297,6 +321,11 @@ class Backtester:
         total_slippage = slippage_open + slippage_close
 
         net_pnl = gross_pnl - total_commission - total_slippage
+        
+        if net_pnl < 0:
+            self.consecutive_losses += 1
+        else:
+            self.consecutive_losses = 0
 
         balance_before, balance_after = self.update_balance(net_pnl, self.current_time, f"CLOSE_TRADE_{self.symbol}")
 
@@ -372,7 +401,7 @@ class Backtester:
         if not np.isclose(self.initial_capital + total_net_pnl, self.balance):
             print("\n---!!! BALANCE MISMATCH ERROR !!!---")
             print(f"Initial: {self.initial_capital:.2f} + Net PnL: {total_net_pnl:.2f} = {self.initial_capital + total_net_pnl:.2f}")
-            print(f"Final Balance: {self.balance:.2f}")
+            print(f"Final Balance: {final_balance:.2f}")
             print("------------------------------------")
 
         print(f"\nTotal Trades: {total_trades}\nWin Rate: {win_rate:.2f}%\nProfit Factor: {profit_factor_display}")
@@ -428,6 +457,16 @@ class Backtester:
 
             # Ensure we have enough data to run indicators
             if len(hist_1h) < 60 or len(hist_15m) < 110 or len(hist_5m) < 70 or len(hist_1m) < 70: continue
+
+            # --- Volatility and Trend Filters ---
+            current_atr = self.data_15m.asof(self.current_time)['atr']
+            avg_atr = self.data_15m['atr'].rolling(window=50).mean().asof(self.current_time)
+            if pd.notna(current_atr) and pd.notna(avg_atr) and current_atr < (avg_atr * 0.5):
+                continue # Skip if volatility is too low
+
+            current_adx = adx(hist_15m, period=14).iloc[-1]
+            if pd.notna(current_adx) and current_adx < 25:
+                continue # Skip if market is not trending
             
             detection_results = {}
             htf_market_bias = detect_htf_market_structure(hist_1h, **self.config['htf_market_structure'])
@@ -447,12 +486,12 @@ class Backtester:
             detection_results.update({
                 'liquidity_sweep': detect_liquidity_sweep(hist_5m, **self.config['liquidity_sweep']),
                 'ote': compute_ote(hist_15m),
-                'breaker': detect_breaker_blocks(hist_15m, '15m'),
-                'vwap_hvn': institutional_imbalance_vwap(hist_15m),
+                'breaker': detect_breaker_blocks(hist_15m, '15m', **self.config),
+                'vwap_hvn': institutional_imbalance_vwap(hist_15m, **self.config),
                 'momentum': momentum_volume_filter(hist_5m, '5m', **self.config['momentum_filter']),
                 'candle_body_confirm': candle_body_confirmation(hist_5m.iloc[-1], zone, side),
                 'session_spread': session_and_spread_filter(),
-                'micro_sniper_trigger': micro_sniper_trigger(hist_1m, **self.config['micro_sniper_trigger'])
+                'micro_sniper_trigger': micro_sniper_trigger(hist_1m, htf_market_bias.get('side'), **self.config['micro_sniper_trigger'])
             })
             
             confluence_results = compute_confluence_score(detection_results, self.config['weights'])
@@ -463,7 +502,7 @@ class Backtester:
                 print(f"[{self.current_time}] CONFLUENCE RAW -> composite: {composite_score:.4f} votes: {confluence_results.get('votes')} full: {confluence_results}")
             
             # Soft gating (gentle penalties and debug logging)
-            penalty_amount = 0.5  # gentle penalty to reduce false positives but not kill all candidates
+            penalty_amount = self.config.get('soft_penalty', 0.3)
 
             if self.config.get('require_htf_score') and htf_market_bias.get('score', 0) < self.config['htf_market_structure']['score_threshold']:
                 composite_score -= penalty_amount
@@ -545,19 +584,54 @@ class Backtester:
             self.candidates.append(candidate_log)
 
             if not reject_reasons and side != 'neutral':
-                if last_ob:
-                    ob_key = (last_ob['origin_idx'], tuple(last_ob['zone']))
-                    if ob_key in self.ob_cooldown and (self.current_time - self.ob_cooldown[ob_key] < self.cooldown_period):
-                        continue
-                self.execute_trade(side, plan['entry_price'], plan['stop_loss'], plan['targets'][0], plan['targets'][1], last_ob)
+                # --- Correlation Check ---
+                is_correlated = False
+                corr_config = self.config.get('correlation_check', {})
+                if corr_config.get('enabled', False) and self.all_trades:
+                    open_positions_other_symbols = []
+                    for trade in self.all_trades:
+                        if trade['entry_time'] <= self.current_time and self.current_time < trade['exit_time']:
+                            open_positions_other_symbols.append(trade)
+                    
+                    if open_positions_other_symbols:
+                        lookback = corr_config.get('lookback_candles', 100)
+                        threshold = corr_config.get('threshold', 0.85)
+                        hist_self = self.data_5m[self.data_5m.index <= self.current_time].tail(lookback)['close']
+
+                        for open_trade in open_positions_other_symbols:
+                            other_symbol = open_trade['symbol']
+                            if other_symbol == self.symbol or other_symbol not in self.all_data: continue
+
+                            hist_other = self.all_data[other_symbol]['data_5m']
+                            hist_other = hist_other[hist_other.index <= self.current_time].tail(lookback)['close']
+                            
+                            aligned_self, aligned_other = hist_self.align(hist_other, join='inner')
+
+                            if len(aligned_self) > lookback * 0.8: # Ensure sufficient overlapping data
+                                correlation = aligned_self.pct_change().corr(aligned_other.pct_change())
+                                if pd.notna(correlation) and abs(correlation) > threshold:
+                                    is_correlated = True
+                                    reason = f'high_correlation_with_{other_symbol} ({correlation:.2f})'
+                                    reject_reasons.append(reason)
+                                    self.candidates[-1]['reject_reasons'] = reject_reasons # Update last candidate
+                                    print(f"[{self.current_time}] CANCELED {self.symbol} trade due to: {reason}")
+                                    break 
+                
+                if not is_correlated:
+                    if last_ob:
+                        ob_key = (last_ob['origin_idx'], tuple(last_ob['zone']))
+                        if ob_key in self.ob_cooldown and (self.current_time - self.ob_cooldown[ob_key] < self.cooldown_period):
+                            continue
+                    self.execute_trade(side, plan['entry_price'], plan['stop_loss'], plan['targets'][0], plan['targets'][1], last_ob)
 
         print("Backtest finished.")
         if self.position:
-            # close at last available close price (end-of-data)
-            last_close = self.data_5m.iloc[-1]['close']
+            # Close at the worst price of the last candle to be conservative
+            last_candle = self.data_5m.iloc[-1]
+            exit_price = last_candle['low'] if self.position['side'] == 'buy' else last_candle['high']
             self.current_time = self.data_5m.index[-1]
-            print(f"[{self.current_time}] EOD - forcing close of open position")
-            self.close_trade(last_close, 'EOD')
+            print(f"[{self.current_time}] EOD - forcing close of open position at worst price: {exit_price}")
+            self.close_trade(exit_price, 'EOD_WORST_PRICE')
         self.generate_report()
         return self.balance
 
@@ -589,32 +663,48 @@ def generate_consolidated_report(all_trades, initial_capital, final_balance):
         
         winning_trades = symbol_trades[symbol_trades['net_pnl'] > 0]
         losing_trades = symbol_trades[symbol_trades['net_pnl'] <= 0]
-        win_rate = (len(winning_trades) / total_trades) * 100
+        win_rate = (len(winning_trades) / total_trades) * 100 if total_trades > 0 else 0
         total_pnl = symbol_trades['net_pnl'].sum()
         
+        avg_win = winning_trades['net_pnl'].mean() if len(winning_trades) > 0 else 0
+        avg_loss = losing_trades['net_pnl'].mean() if len(losing_trades) > 0 else 0
+        
+        sum_wins = winning_trades['net_pnl'].sum()
+        sum_losses = abs(losing_trades['net_pnl'].sum())
+        profit_factor = sum_wins / sum_losses if sum_losses > 0 else 'inf'
+
         summary_list.append({
             'Symbol': symbol,
             'Total Trades': total_trades,
-            'Winning Trades': len(winning_trades),
-            'Losing Trades': len(losing_trades),
             'Win Rate (%)': f"{win_rate:.2f}",
-            'Total PnL': f"{total_pnl:.2f}"
+            'Total PnL': f"{total_pnl:.2f}",
+            'Avg Win': f"{avg_win:.2f}",
+            'Avg Loss': f"{avg_loss:.2f}",
+            'Profit Factor': f"{profit_factor:.2f}" if isinstance(profit_factor, (int, float)) else profit_factor
         })
 
     # Consolidated summary
     total_trades = len(trades_df)
     winning_trades = trades_df[trades_df['net_pnl'] > 0]
     losing_trades = trades_df[trades_df['net_pnl'] <= 0]
-    win_rate = (len(winning_trades) / total_trades) * 100
+    win_rate = (len(winning_trades) / total_trades) * 100 if total_trades > 0 else 0
     total_net_pnl = trades_df['net_pnl'].sum()
+
+    avg_win = winning_trades['net_pnl'].mean() if len(winning_trades) > 0 else 0
+    avg_loss = losing_trades['net_pnl'].mean() if len(losing_trades) > 0 else 0
+    
+    sum_wins = winning_trades['net_pnl'].sum()
+    sum_losses = abs(losing_trades['net_pnl'].sum())
+    profit_factor = sum_wins / sum_losses if sum_losses > 0 else 'inf'
 
     summary_list.append({
         'Symbol': 'Total',
         'Total Trades': total_trades,
-        'Winning Trades': len(winning_trades),
-        'Losing Trades': len(losing_trades),
         'Win Rate (%)': f"{win_rate:.2f}",
-        'Total PnL': f"{total_net_pnl:.2f}"
+        'Total PnL': f"{total_net_pnl:.2f}",
+        'Avg Win': f"{avg_win:.2f}",
+        'Avg Loss': f"{avg_loss:.2f}",
+        'Profit Factor': f"{profit_factor:.2f}" if isinstance(profit_factor, (int, float)) else profit_factor
     })
     
     summary_df = pd.DataFrame(summary_list)
@@ -657,26 +747,41 @@ if __name__ == "__main__":
     5.  The backtest report and PnL curve chart will be generated for each symbol.
     """
     # --- Configuration ---
-    # For this test run, we use a single symbol and a very short date range to speed up verification.
-    symbols_to_test = os.getenv("SYMBOLS", "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,TRXUSDT,TONUSDT,LTCUSDT,AAVEUSDT").split(',')
+    symbols_to_test = ["BTCUSDT", "ETHUSDT"]
     start_date_str = "2025-08-30"
     end_date_str = "2025-09-06"
     initial_capital = 10.0
     
     print("Backtesting framework starting...")
+
+    # Pre-load all data for all symbols
+    all_data = {}
+    for symbol in symbols_to_test:
+        print(f"Loading data for {symbol}...")
+        data_for_symbol = {f'data_{tf}': fetch_and_cache_data(symbol, tf, start_date_str, end_date_str, config.get('tld', 'com')) for tf in ['1m', '5m', '15m', '1h']}
+        if any(df.empty for df in data_for_symbol.values()):
+            print(f"Could not load full data for {symbol}, it will be skipped.")
+        all_data[symbol] = data_for_symbol
     
     final_balance = initial_capital
     all_trades = []
 
     for symbol_to_test in symbols_to_test:
-        print(f"--- Running backtest for {symbol_to_test} ---")
-        print("Ensuring data is available...")
-        data_to_load = {f'data_{tf}': fetch_and_cache_data(symbol_to_test, tf, start_date_str, end_date_str, config.get('tld', 'com')) for tf in ['1m', '5m', '15m', '1h']}
-        if not any(df.empty for df in data_to_load.values()):
-            backtester = Backtester(symbol_to_test, start_date_str, end_date_str, final_balance, **data_to_load, config=config)
-            final_balance = backtester.run()
-            all_trades.extend(backtester.trades)
-        else:
-            print(f"Could not load data for {symbol_to_test}, aborting backtest for this symbol.")
+        if symbol_to_test not in all_data or any(df.empty for df in all_data[symbol_to_test].values()):
+            continue
+
+        print(f"\n--- Running backtest for {symbol_to_test} ---")
+        backtester = Backtester(
+            symbol=symbol_to_test, 
+            start_date=start_date_str, 
+            end_date=end_date_str, 
+            initial_capital=final_balance, 
+            **all_data[symbol_to_test], 
+            config=config,
+            all_trades=all_trades,
+            all_data=all_data
+        )
+        final_balance = backtester.run()
+        all_trades.extend(backtester.trades)
     
     generate_consolidated_report(all_trades, initial_capital, final_balance)
