@@ -9,10 +9,15 @@ import matplotlib.pyplot as plt
 
 # --- Configuration ---
 config = {
+    'tld': 'com',
+    'min_trade_value_override': None,
+    'risk_pct': 0.02,
+    'min_risk_amount': 0.5,
     'entry_threshold': 3.4,
     'require_htf_score': True,
     'require_momentum': True,
     'commission': 0.0006,
+    'slippage': 0.0005,
     'cooldown_period_hours': 3,
 
     'htf_market_structure': {
@@ -71,7 +76,7 @@ BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
 # --- Exchange Info Helpers ---
 symbol_info_cache = {}
 
-def get_symbol_info_once(symbol):
+def get_symbol_info_once(symbol, tld='com'):
     """
     Fetches and caches symbol information from Binance.
     This is to avoid repeated API calls for the same symbol info.
@@ -80,24 +85,46 @@ def get_symbol_info_once(symbol):
     if symbol_upper in symbol_info_cache:
         return symbol_info_cache[symbol_upper]
     
-    client = Client(BINANCE_API_KEY, BINANCE_API_SECRET, tld='us')
     try:
+        client = Client(BINANCE_API_KEY, BINANCE_API_SECRET, tld=tld)
         exchange_info = client.get_exchange_info()
         for s in exchange_info['symbols']:
             if s['symbol'] == symbol_upper:
                 symbol_info_cache[symbol_upper] = s
                 return s
     except Exception as e:
-        print(f"Could not fetch exchange info: {e}")
+        print(f"Could not fetch exchange info for {symbol} using tld={tld}: {e}")
+    
+    print(f"WARNING: Could not find symbol info for {symbol}. Using default values.")
+    if symbol_upper == 'BTCUSDT':
+        return {
+            'symbol': 'BTCUSDT',
+            'filters': [
+                {'filterType': 'LOT_SIZE', 'stepSize': '0.00001'},
+                {'filterType': 'MIN_NOTIONAL', 'minNotional': '5.0'}
+            ]
+        }
     return None
 
 def get_step_size(symbol: str, symbol_info: dict) -> Decimal:
     """Extracts the lot step size from the symbol information."""
-    if not symbol_info: return Decimal('1')
+    if not symbol_info:
+        print(f"WARNING: symbol_info missing for {symbol}. Using default step_size=1.")
+        return Decimal('1')
     for f in symbol_info.get('filters', []):
         if f.get('filterType') == 'LOT_SIZE':
             return Decimal(str(f.get('stepSize', '1')))
     return Decimal('1')
+
+def get_min_notional(symbol: str, symbol_info: dict) -> Decimal:
+    """Extracts the min notional value from the symbol information."""
+    if not symbol_info:
+        print(f"WARNING: symbol_info missing for {symbol}. Using default min_notional=0.")
+        return Decimal('0')
+    for f in symbol_info.get('filters', []):
+        if f.get('filterType') == 'MIN_NOTIONAL':
+            return Decimal(str(f.get('minNotional', '0')))
+    return Decimal('0')
 
 def round_qty(qty: float, step_size: Decimal) -> float:
     """Rounds a quantity down to the nearest valid step size."""
@@ -106,7 +133,7 @@ def round_qty(qty: float, step_size: Decimal) -> float:
     rounded_qty = (qty_decimal / step_size).to_integral_value(rounding=ROUND_DOWN) * step_size
     return float(rounded_qty)
 
-def fetch_and_cache_data(symbol: str, timeframe: str, start_date: str, end_date: str) -> pd.DataFrame:
+def fetch_and_cache_data(symbol: str, timeframe: str, start_date: str, end_date: str, tld: str = 'com') -> pd.DataFrame:
     """
     Fetches historical k-line data from Binance and caches it locally.
     """
@@ -115,11 +142,11 @@ def fetch_and_cache_data(symbol: str, timeframe: str, start_date: str, end_date:
     if os.path.exists(filename):
         return pd.read_csv(filename, index_col='timestamp', parse_dates=True)
     print(f"Fetching new data for {symbol} ({timeframe}) from {start_date} to {end_date}")
-    client = Client(BINANCE_API_KEY, BINANCE_API_SECRET, tld='us')
     try:
+        client = Client(BINANCE_API_KEY, BINANCE_API_SECRET, tld=tld)
         klines = client.get_historical_klines(symbol, timeframe, start_date, end_date)
     except Exception as e:
-        print(f"An error occurred: {e}")
+        print(f"An error occurred while fetching data for {symbol}: {e}")
         return pd.DataFrame()
     if not klines: return pd.DataFrame()
     df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'])
@@ -145,6 +172,8 @@ class Backtester:
         self.balance = initial_capital
         self.position = None
         self.trades = []
+        self.ledger = []
+        self.candidates = []
         self.config = config
         self.commission = config['commission']
         self.entry_threshold = config['entry_threshold']
@@ -152,16 +181,51 @@ class Backtester:
         self.require_momentum = config['require_momentum']
         self.data_5m, self.data_15m, self.data_1h = data_5m, data_15m, data_1h
         if not self.data_15m.empty: self.data_15m['atr'] = atr(self.data_15m, self.config['order_blocks']['atr_period'])
-        self.symbol_info = get_symbol_info_once(self.symbol)
+        self.symbol_info = get_symbol_info_once(self.symbol, self.config.get('tld', 'com'))
         self.step_size = get_step_size(self.symbol, self.symbol_info)
+        self.min_notional = get_min_notional(self.symbol, self.symbol_info)
+
+        # make a float copy for numeric comparisons and log defaults
+        try:
+            self.min_notional_float = float(self.min_notional)
+        except Exception:
+            self.min_notional_float = 0.0
+
+        if self.min_notional_float == 0.0:
+            print(f"[INIT] Note: min_notional for {self.symbol} = 0.0 (default). Step size: {self.step_size}")
+        else:
+            print(f"[INIT] {self.symbol} min_notional = {self.min_notional_float}, step_size = {self.step_size}")
         self.current_time = None
         self.ob_cooldown = {}
         self.cooldown_period = pd.Timedelta(hours=config['cooldown_period_hours'])
 
+    def update_balance(self, net_pnl, timestamp, description):
+        """Updates balance and records the transaction in the ledger."""
+        balance_before = self.balance
+        self.balance += net_pnl
+        balance_after = self.balance
+        self.ledger.append({
+            'timestamp': timestamp,
+            'trade_id': len(self.trades) + 1,
+            'account': 'cash',
+            'debit': net_pnl if net_pnl < 0 else 0,
+            'credit': net_pnl if net_pnl > 0 else 0,
+            'balance_before': balance_before,
+            'balance_after': balance_after,
+            'description': description,
+        })
+        print(f"[{timestamp}] BALANCE UPDATE | Amount: {net_pnl:.2f} | New Balance: {self.balance:.2f} | Desc: {description}")
+        return balance_before, balance_after
+
     def calculate_risk_amount(self):
         """Calculates the amount to risk on a trade based on the current balance."""
-        if self.balance < 50.0: return 0.5
-        else: return self.balance * 0.02
+        risk_pct = self.config.get('risk_pct', 0.02)
+        min_risk = self.config.get('min_risk_amount', 0.5)
+        
+        if self.balance * risk_pct < min_risk:
+            return min_risk
+        else:
+            return self.balance * risk_pct
 
     def calculate_position_size(self, entry_price, sl_price):
         """Calculates the position size based on risk amount and stop loss distance."""
@@ -180,11 +244,26 @@ class Backtester:
             ob_key = (order_block['origin_idx'], tuple(order_block['zone']))
             self.ob_cooldown[ob_key] = self.current_time
 
-        notional_value = size * entry_price
-        # commission_cost = notional_value * self.commission
-        # self.balance -= commission_cost
-        self.position = {'side': side, 'entry_price': entry_price, 'size': size, 'sl': sl_price, 'tp1': tp1, 'tp2': tp2, 'notional': notional_value, 'open_time': self.current_time, 'be_moved': False, 'trailing_active': False}
-        print(f"[{self.current_time}] OPEN {side} | Size: {size:.4f} | Entry: {entry_price:.2f} | SL: {sl_price:.2f} | TP1: {tp1:.2f} | TP2: {tp2:.2f}")
+        entry_price_after_slippage = entry_price + (entry_price * self.config.get('slippage', 0.0)) if side == 'buy' else entry_price - (entry_price * self.config.get('slippage', 0.0))
+        
+        notional_value = size * entry_price_after_slippage
+        commission_open = notional_value * self.commission
+        
+        self.position = {
+            'side': side, 
+            'entry_price': entry_price_after_slippage, 
+            'size': size, 
+            'sl': sl_price, 
+            'tp1': tp1, 
+            'tp2': tp2, 
+            'notional': notional_value, 
+            'open_time': self.current_time, 
+            'be_moved': False, 
+            'trailing_active': False,
+            'commission_open': commission_open,
+            'slippage_open': abs(entry_price - entry_price_after_slippage) * size,
+        }
+        print(f"[{self.current_time}] OPEN {side} | Size: {size:.4f} | Entry: {entry_price_after_slippage:.2f} | SL: {sl_price:.2f} | TP1: {tp1:.2f} | TP2: {tp2:.2f}")
 
     def manage_position(self):
         """Manages the currently open position, checking for SL/TP hits and trailing SL."""
@@ -225,14 +304,47 @@ class Backtester:
 
     def close_trade(self, exit_price, reason):
         """Simulates closing the current trade and records the result."""
-        if self.position:
-            print(f"DEBUG: closing {self.position['side']} at {exit_price} reason={reason} stored_SL={self.position['sl']:.2f} tp1={self.position['tp1']:.2f} tp2={self.position['tp2']:.2f}")
-        pnl = (exit_price - self.position['entry_price']) * self.position['size'] if self.position['side'] == 'buy' else (self.position['entry_price'] - exit_price) * self.position['size']
-        commission_cost = self.position['notional'] * self.commission
-        self.balance += pnl - commission_cost
-        trade_log = {**self.position, 'symbol': self.symbol, 'exit_price': exit_price, 'pnl': pnl, 'exit_reason': reason, 'close_time': self.current_time}
+        if not self.position:
+            return
+
+        exit_price_after_slippage = exit_price - (exit_price * self.config.get('slippage', 0.0)) if self.position['side'] == 'buy' else exit_price + (exit_price * self.config.get('slippage', 0.0))
+
+        gross_pnl = (exit_price_after_slippage - self.position['entry_price']) * self.position['size'] if self.position['side'] == 'buy' else (self.position['entry_price'] - exit_price_after_slippage) * self.position['size']
+        
+        commission_open = self.position['commission_open']
+        commission_close = (self.position['size'] * exit_price_after_slippage) * self.commission
+        total_commission = commission_open + commission_close
+
+        slippage_open = self.position['slippage_open']
+        slippage_close = abs(exit_price - exit_price_after_slippage) * self.position['size']
+        total_slippage = slippage_open + slippage_close
+
+        net_pnl = gross_pnl - total_commission - total_slippage
+
+        balance_before, balance_after = self.update_balance(net_pnl, self.current_time, f"CLOSE_TRADE_{self.symbol}")
+
+        trade_log = {
+            'trade_id': len(self.trades) + 1,
+            'symbol': self.symbol,
+            'entry_time': self.position['open_time'],
+            'exit_time': self.current_time,
+            'entry_price': self.position['entry_price'],
+            'exit_price': exit_price_after_slippage,
+            'qty': self.position['size'],
+            'gross_pnl': gross_pnl,
+            'commission_open': commission_open,
+            'commission_close': commission_close,
+            'total_commission': total_commission,
+            'slippage_open': slippage_open,
+            'slippage_close': slippage_close,
+            'total_slippage': total_slippage,
+            'net_pnl': net_pnl,
+            'balance_before': balance_before,
+            'balance_after': balance_after,
+            'exit_reason': reason,
+        }
         self.trades.append(trade_log)
-        print(f"[{self.current_time}] CLOSE {self.position['side']} | Exit: {exit_price:.2f} | PnL: {pnl:.2f} | Balance: {self.balance:.2f} | Reason: {reason}")
+        print(f"[{self.current_time}] CLOSE {self.position['side']} | Exit: {exit_price_after_slippage:.2f} | Net PnL: {net_pnl:.2f} | Balance: {self.balance:.2f} | Reason: {reason}")
         self.position = None
 
     def generate_report(self):
@@ -241,35 +353,83 @@ class Backtester:
         if not self.trades:
             print("No trades were executed."); return
 
-        trades_df = pd.DataFrame(self.trades); trades_df['close_time'] = pd.to_datetime(trades_df['close_time']); trades_df.set_index('close_time', inplace=True)
-        total_pnl = trades_df['pnl'].sum()
+        trades_df = pd.DataFrame(self.trades)
+        if 'close_time' in trades_df.columns:
+            trades_df['close_time'] = pd.to_datetime(trades_df['close_time'])
+            trades_df.set_index('close_time', inplace=True)
+
+        total_gross_pnl = trades_df['gross_pnl'].sum()
+        total_commission = trades_df['total_commission'].sum()
+        total_slippage = trades_df['total_slippage'].sum()
+        total_net_pnl = trades_df['net_pnl'].sum()
+        
         total_trades = len(trades_df)
-        winning_trades = trades_df[trades_df['pnl'] > 0]
+        winning_trades = trades_df[trades_df['net_pnl'] > 0]
         win_rate = (len(winning_trades) / total_trades) * 100 if total_trades > 0 else 0
         
-        losing_sum = abs(trades_df[trades_df['pnl'] <= 0]['pnl'].sum())
+        losing_sum = abs(trades_df[trades_df['net_pnl'] <= 0]['net_pnl'].sum())
         if losing_sum == 0:
-            profit_factor_display = 'N/A'
+            profit_factor_display = 'inf' if winning_trades['net_pnl'].sum() > 0 else 'N/A'
         else:
-            profit_factor_display = f"{winning_trades['pnl'].sum() / losing_sum:.2f}"
+            profit_factor_display = f"{winning_trades['net_pnl'].sum() / losing_sum:.2f}"
 
-        cumulative_pnl = trades_df['pnl'].cumsum()
+        cumulative_pnl = trades_df['net_pnl'].cumsum()
         max_drawdown = (cumulative_pnl.cummax() - cumulative_pnl).max()
         
-        # compute daily equity returns, then sharpe:
-        equity = (self.initial_capital + cumulative_pnl).resample('D').last().ffill().pct_change().dropna()
-        if len(equity) > 1:
-            sharpe_ratio = equity.mean() / equity.std() * np.sqrt(252) if equity.std() > 0 else 0.0
+        equity = (self.initial_capital + cumulative_pnl)
+        if len(equity.pct_change().dropna()) > 1:
+            sharpe_ratio = equity.pct_change().mean() / equity.pct_change().std() * np.sqrt(252) if equity.pct_change().std() > 0 else 0.0
         else:
             sharpe_ratio = 0.0
 
-        print(f"Initial Capital: {self.initial_capital:.2f}\nFinal Balance: {self.balance:.2f}\nTotal PnL: {total_pnl:.2f}")
-        print(f"Total Trades: {total_trades}\nWin Rate: {win_rate:.2f}%\nProfit Factor: {profit_factor_display}")
+        print(f"Initial Capital: {self.initial_capital:.2f}\nFinal Balance: {self.balance:.2f}")
+        print(f"Total Gross PnL: {total_gross_pnl:.2f}")
+        print(f"Total Commissions: {total_commission:.2f}")
+        print(f"Total Slippage: {total_slippage:.2f}")
+        print(f"Total Net PnL: {total_net_pnl:.2f}")
+
+        if not np.isclose(self.initial_capital + total_net_pnl, self.balance):
+            print("\n---!!! BALANCE MISMATCH ERROR !!!---")
+            print(f"Initial: {self.initial_capital:.2f} + Net PnL: {total_net_pnl:.2f} = {self.initial_capital + total_net_pnl:.2f}")
+            print(f"Final Balance: {self.balance:.2f}")
+            print("------------------------------------")
+
+        print(f"\nTotal Trades: {total_trades}\nWin Rate: {win_rate:.2f}%\nProfit Factor: {profit_factor_display}")
         print(f"Max Drawdown: {max_drawdown:.2f}\nSharpe Ratio: {sharpe_ratio:.2f}")
         
-        plt.figure(figsize=(12, 6)); (self.initial_capital + cumulative_pnl).plot(); plt.title(f'Portfolio Equity Curve - {self.symbol}')
+        plt.figure(figsize=(12, 6)); equity.plot(); plt.title(f'Portfolio Equity Curve - {self.symbol}')
         plt.xlabel('Date'); plt.ylabel('Equity (USDT)'); plt.grid(True); plt.savefig(f'pnl_curve_{self.symbol}.png')
         print(f"\nChart saved to pnl_curve_{self.symbol}.png")
+        
+        # Save candidates to CSV
+        if self.candidates:
+            candidates_df = pd.DataFrame(self.candidates)
+            candidates_df.to_csv('candidates.csv', index=False)
+            print("Candidates saved to candidates.csv")
+
+            # --- Candidate Summary ---
+            print("\n--- Candidate Summary ---")
+            print(f"Total candidates considered: {len(self.candidates)}")
+
+            # Filter for candidates that were not rejected
+            accepted_candidates = candidates_df[candidates_df['reject_reasons'].apply(lambda x: isinstance(x, list) and len(x) == 0)]
+            print(f"Total candidates passed all filters: {len(accepted_candidates)}")
+
+            if not accepted_candidates.empty:
+                print("\nScore distribution for accepted candidates:")
+                print(accepted_candidates['confluence_score'].describe())
+
+                print("\nTop 10 accepted candidates by score:")
+                print(accepted_candidates.sort_values(by='confluence_score', ascending=False).head(10)[['timestamp', 'confluence_score', 'planned_position_value']])
+
+            # Show rejection reasons breakdown
+            print("\nRejection Reasons Breakdown:")
+            rejected_candidates = candidates_df[candidates_df['reject_reasons'].apply(lambda x: isinstance(x, list) and len(x) > 0)]
+            if not rejected_candidates.empty:
+                rejection_counts = rejected_candidates['reject_reasons'].explode().value_counts()
+                print(rejection_counts)
+            else:
+                print("No candidates were rejected based on the logged reasons.")
 
     def run(self):
         """Runs the main backtesting loop."""
@@ -284,9 +444,6 @@ class Backtester:
             detection_results = {}
             htf_market_bias = detect_htf_market_structure(hist_1h, **self.config['htf_market_structure'])
             detection_results['htf_market_bias'] = htf_market_bias
-            
-            if htf_market_bias['score'] < self.config['htf_market_structure']['score_threshold']:
-                continue
             
             side = htf_market_bias.get('side')
             
@@ -311,37 +468,79 @@ class Backtester:
             
             confluence_results = compute_confluence_score(detection_results, self.config['weights'])
             composite_score = confluence_results['composite_score']
+
+            # debug: show full confluence details so we understand the score scale
+            if self.config.get('debug'):
+                print(f"[{self.current_time}] CONFLUENCE RAW -> composite: {composite_score:.4f} votes: {confluence_results.get('votes')} full: {confluence_results}")
             
-            if composite_score >= self.entry_threshold:
-                side = detection_results['htf_market_bias']['side']
-                if side != 'neutral':
-                    # --- Strengthened Entry Logic ---
-                    if self.require_momentum and detection_results['momentum']['score'] == 0:
-                        continue
+            # Soft gating (gentle penalties and debug logging)
+            penalty_amount = 0.5  # gentle penalty to reduce false positives but not kill all candidates
 
-                    last_ob = detection_results['order_block']['meta']
-                    if last_ob and last_ob.get('strength', 0) < 0.2:
-                        continue
-                    
-                    last_fvg = detection_results['fvg']['meta']
-                    if last_fvg and last_fvg.get('strength', 0) < 0.2:
-                        continue
+            if self.config.get('require_htf_score') and htf_market_bias.get('score', 0) < self.config['htf_market_structure']['score_threshold']:
+                composite_score -= penalty_amount
 
-                    if last_ob:
-                        ob_key = (last_ob['origin_idx'], tuple(last_ob['zone']))
-                        if ob_key in self.ob_cooldown and (self.current_time - self.ob_cooldown[ob_key] < self.cooldown_period):
-                            continue
+            if self.config.get('require_momentum') and detection_results['momentum'].get('score', 0) == 0:
+                composite_score -= penalty_amount
 
-                    atr_15m = self.data_15m.asof(self.current_time)['atr']
-                    if pd.isna(atr_15m) or atr_15m == 0:
-                        price = hist_5m.iloc[-1]['close']
-                        atr_15m = self.data_15m['atr'].dropna().iloc[-1] if self.data_15m['atr'].dropna().any() else max(1.0, price * 0.001)
-                    plan = plan_entry_action(self.symbol, side, composite_score, detection_results, hist_5m.iloc[-1]['close'], atr_15m, self.config['entry_planning'])
-                    self.execute_trade(side, plan['entry_price'], plan['stop_loss'], plan['targets'][0], plan['targets'][1], last_ob)
-            else:
-                # Optional: Log rejected candidates for tuning
-                if composite_score > 1.5: # Log only potentially interesting ones
-                    print(f"[{self.current_time}] REJECT | Score: {composite_score:.2f} | Votes: {confluence_results['votes']}")
+            if last_ob and last_ob.get('strength', 0) < self.config['order_blocks']['strength_threshold']:
+                composite_score -= penalty_amount
+
+            if last_fvg and last_fvg.get('strength', 0) < self.config['fair_value_gaps']['strength_threshold']:
+                composite_score -= penalty_amount
+
+            # debug print for every candidate
+            if self.config.get('debug'):
+                print(f"[{self.current_time}] DEBUG composite_score: {composite_score:.3f} | htf_score: {htf_market_bias.get('score', None)} | momentum: {detection_results['momentum'].get('score', None)} | ob_strength: {last_ob.get('strength') if last_ob else None}")
+
+            # Candidate logging
+            reject_reasons = []
+            if composite_score < self.entry_threshold:
+                reject_reasons.append('score_too_low')
+
+            # Calculate planned position size and value
+            plan = plan_entry_action(self.symbol, side, composite_score, detection_results, hist_5m.iloc[-1]['close'], self.data_15m.asof(self.current_time)['atr'], self.config['entry_planning'])
+            
+            if not plan or 'entry_price' not in plan or 'stop_loss' not in plan:
+                print(f"[{self.current_time}] ERROR: plan_entry_action returned invalid plan: {plan}")
+                continue
+
+            calculated_qty = self.calculate_position_size(plan['entry_price'], plan['stop_loss'])
+            planned_position_value = calculated_qty * plan['entry_price']
+
+            min_notional_pass = planned_position_value >= self.min_notional_float
+            min_qty_pass = calculated_qty > 0
+            
+            min_trade_override = self.config.get('min_trade_value_override')
+            if not min_notional_pass and min_trade_override and planned_position_value >= min_trade_override:
+                min_notional_pass = True
+                print(f"[{self.current_time}] INFO: Overriding min_notional check for {self.symbol}. Planned: {planned_position_value:.2f}, Min: {self.min_notional}")
+
+
+            if not min_notional_pass:
+                reject_reasons.append(f'min_notional_fail (req: {self.min_notional}, got: {planned_position_value:.2f})')
+            if not min_qty_pass:
+                reject_reasons.append('min_qty_fail')
+            
+            candidate_log = {
+                'symbol': self.symbol,
+                'timestamp': self.current_time,
+                'confluence_score': composite_score,
+                'score_breakdown': confluence_results['votes'],
+                'reject_reasons': reject_reasons,
+                'planned_position_value': planned_position_value,
+                'calculated_qty': calculated_qty,
+                'min_notional_pass': min_notional_pass,
+                'min_qty_pass': min_qty_pass,
+            }
+            self.candidates.append(candidate_log)
+
+            if not reject_reasons and side != 'neutral':
+                if last_ob:
+                    ob_key = (last_ob['origin_idx'], tuple(last_ob['zone']))
+                    if ob_key in self.ob_cooldown and (self.current_time - self.ob_cooldown[ob_key] < self.cooldown_period):
+                        continue
+                self.execute_trade(side, plan['entry_price'], plan['stop_loss'], plan['targets'][0], plan['targets'][1], last_ob)
+
         print("Backtest finished.")
         if self.position:
             # close at last available close price (end-of-data)
@@ -364,8 +563,8 @@ def generate_consolidated_report(all_trades, initial_capital, final_balance):
     
     # Create a DataFrame from all trades
     trades_df = pd.DataFrame(all_trades)
-    trades_df['close_time'] = pd.to_datetime(trades_df['close_time'])
-    trades_df.sort_values(by='close_time', inplace=True)
+    trades_df['exit_time'] = pd.to_datetime(trades_df['exit_time'])
+    trades_df.sort_values(by='exit_time', inplace=True)
     
     # Save all trades to CSV
     trades_df.to_csv('all_trade_details.csv', index=False)
@@ -377,10 +576,10 @@ def generate_consolidated_report(all_trades, initial_capital, final_balance):
         total_trades = len(symbol_trades)
         if total_trades == 0: continue
         
-        winning_trades = symbol_trades[symbol_trades['pnl'] > 0]
-        losing_trades = symbol_trades[symbol_trades['pnl'] <= 0]
+        winning_trades = symbol_trades[symbol_trades['net_pnl'] > 0]
+        losing_trades = symbol_trades[symbol_trades['net_pnl'] <= 0]
         win_rate = (len(winning_trades) / total_trades) * 100
-        total_pnl = symbol_trades['pnl'].sum()
+        total_pnl = symbol_trades['net_pnl'].sum()
         
         summary_list.append({
             'Symbol': symbol,
@@ -393,10 +592,10 @@ def generate_consolidated_report(all_trades, initial_capital, final_balance):
 
     # Consolidated summary
     total_trades = len(trades_df)
-    winning_trades = trades_df[trades_df['pnl'] > 0]
-    losing_trades = trades_df[trades_df['pnl'] <= 0]
+    winning_trades = trades_df[trades_df['net_pnl'] > 0]
+    losing_trades = trades_df[trades_df['net_pnl'] <= 0]
     win_rate = (len(winning_trades) / total_trades) * 100
-    total_pnl = trades_df['pnl'].sum()
+    total_net_pnl = trades_df['net_pnl'].sum()
 
     summary_list.append({
         'Symbol': 'Total',
@@ -404,7 +603,7 @@ def generate_consolidated_report(all_trades, initial_capital, final_balance):
         'Winning Trades': len(winning_trades),
         'Losing Trades': len(losing_trades),
         'Win Rate (%)': f"{win_rate:.2f}",
-        'Total PnL': f"{total_pnl:.2f}"
+        'Total PnL': f"{total_net_pnl:.2f}"
     })
     
     summary_df = pd.DataFrame(summary_list)
@@ -412,7 +611,7 @@ def generate_consolidated_report(all_trades, initial_capital, final_balance):
     print("Account summary saved to account_summary.csv")
     
     # --- Consolidated PnL Curve ---
-    trades_df['cumulative_pnl'] = trades_df['pnl'].cumsum()
+    trades_df['cumulative_pnl'] = trades_df['net_pnl'].cumsum()
     plt.figure(figsize=(12, 6))
     (initial_capital + trades_df['cumulative_pnl']).plot()
     plt.title('Consolidated Portfolio Equity Curve')
@@ -425,8 +624,15 @@ def generate_consolidated_report(all_trades, initial_capital, final_balance):
     # Print final summary to console
     print(f"\nInitial Capital: {initial_capital:.2f}")
     print(f"Final Balance: {final_balance:.2f}")
-    print(f"Total PnL across all symbols: {total_pnl:.2f}")
+    print(f"Total PnL across all symbols: {total_net_pnl:.2f}")
     print(f"Total Trades across all symbols: {total_trades}")
+
+    if not np.isclose(initial_capital + total_net_pnl, final_balance):
+            print("\n---!!! CONSOLIDATED BALANCE MISMATCH ERROR !!!---")
+            print(f"Initial: {initial_capital:.2f} + Net PnL: {total_net_pnl:.2f} = {initial_capital + total_net_pnl:.2f}")
+            print(f"Final Balance: {final_balance:.2f}")
+            print("------------------------------------")
+
 
 if __name__ == "__main__":
     """
@@ -441,8 +647,8 @@ if __name__ == "__main__":
     """
     # --- Configuration ---
     symbols_to_test = os.getenv("SYMBOLS", "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,TRXUSDT,TONUSDT,LTCUSDT,AAVEUSDT").split(',')
-    start_date_str = "2025-08-30"
-    end_date_str = "2025-09-06"
+    start_date_str = "2024-04-01"
+    end_date_str = "2024-05-01"
     initial_capital = 100.0
     
     print("Backtesting framework starting...")
@@ -453,7 +659,7 @@ if __name__ == "__main__":
     for symbol_to_test in symbols_to_test:
         print(f"--- Running backtest for {symbol_to_test} ---")
         print("Ensuring data is available...")
-        data_to_load = {f'data_{tf}': fetch_and_cache_data(symbol_to_test, tf, start_date_str, end_date_str) for tf in ['5m', '15m', '1h']}
+        data_to_load = {f'data_{tf}': fetch_and_cache_data(symbol_to_test, tf, start_date_str, end_date_str, config.get('tld', 'com')) for tf in ['5m', '15m', '1h']}
         if not any(df.empty for df in data_to_load.values()):
             backtester = Backtester(symbol_to_test, start_date_str, end_date_str, final_balance, **data_to_load, config=config)
             final_balance = backtester.run()
