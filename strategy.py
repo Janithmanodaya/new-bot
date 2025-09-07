@@ -45,37 +45,37 @@ def detect_htf_market_structure(candles_1h: pd.DataFrame, **kwargs):
     atr_mult = kwargs.get('atr_mult', 1.0)
     df = candles_1h.copy()
     df['atr'] = atr(df, period=kwargs.get('atr_period', 50))
-    swing_highs, swing_lows = swing_highs_lows(df, lookback=kwargs.get('lookback', 50))
+    highs, lows = swing_highs_lows(df, lookback=kwargs.get('lookback', 50))
 
     side, score, bias_strength = 'neutral', 0.0, 0.0
     last_swing_high, last_swing_low = None, None
-    if not swing_highs.empty: last_swing_high = swing_highs.index[-1]
-    if not swing_lows.empty: last_swing_low = swing_lows.index[-1]
+    if not highs.empty: last_swing_high = highs.index[-1]
+    if not lows.empty: last_swing_low = lows.index[-1]
 
     # need at least two swings of each to compare
-    if len(swing_highs) >= 2 and len(swing_lows) >= 2:
+    if len(highs) >= 2 and len(lows) >= 2:
         # price comparisons (higher-highs & higher-lows -> bullish)
-        hh = swing_highs['high'].iloc[-1] > swing_highs['high'].iloc[-2]
-        hl = swing_lows['low'].iloc[-1] > swing_lows['low'].iloc[-2]
-        ll = swing_lows['low'].iloc[-1] < swing_lows['low'].iloc[-2]
-        lh = swing_highs['high'].iloc[-1] < swing_highs['high'].iloc[-2]
+        hh = highs['high'].iloc[-1] > highs['high'].iloc[-2]
+        hl = lows['low'].iloc[-1] > lows['low'].iloc[-2]
+        ll = lows['low'].iloc[-1] < lows['low'].iloc[-2]
+        lh = highs['high'].iloc[-1] < highs['high'].iloc[-2]
 
         is_bullish = hh and hl
         is_bearish = ll and lh
 
         if is_bullish:
             impulsive_legs = 0
-            for i in range(1, len(swing_lows)):
+            for i in range(1, len(lows)):
                 try:
-                    atr_val = df['atr'].loc[swing_lows.index[i]]
+                    atr_val = df['atr'].loc[lows.index[i]]
                 except Exception:
                     atr_val = np.nan
                 if pd.isna(atr_val):
                     continue
-                if swing_lows['low'].iloc[i] > swing_lows['low'].iloc[i-1]:
-                    next_highs = swing_highs[swing_highs.index > swing_lows.index[i]]
+                if lows['low'].iloc[i] > lows['low'].iloc[i-1]:
+                    next_highs = highs[highs.index > lows.index[i]]
                     if not next_highs.empty:
-                        leg_size = next_highs['high'].iloc[0] - swing_lows['low'].iloc[i]
+                        leg_size = next_highs['high'].iloc[0] - lows['low'].iloc[i]
                         if leg_size > atr_val * atr_mult:
                             impulsive_legs += 1
             score = min(1.0, impulsive_legs / 3.0)
@@ -84,17 +84,17 @@ def detect_htf_market_structure(candles_1h: pd.DataFrame, **kwargs):
 
         elif is_bearish:
             impulsive_legs = 0
-            for i in range(1, len(swing_highs)):
+            for i in range(1, len(highs)):
                 try:
-                    atr_val = df['atr'].loc[swing_highs.index[i]]
+                    atr_val = df['atr'].loc[highs.index[i]]
                 except Exception:
                     atr_val = np.nan
                 if pd.isna(atr_val):
                     continue
-                if swing_highs['high'].iloc[i] < swing_highs['high'].iloc[i-1]:
-                    next_lows = swing_lows[swing_lows.index > swing_highs.index[i]]
+                if highs['high'].iloc[i] < highs['high'].iloc[i-1]:
+                    next_lows = lows[lows.index > highs.index[i]]
                     if not next_lows.empty:
-                        leg_size = swing_highs['high'].iloc[i] - next_lows['low'].iloc[0]
+                        leg_size = highs['high'].iloc[i] - next_lows['low'].iloc[0]
                         if leg_size > atr_val * atr_mult:
                             impulsive_legs += 1
             score = min(1.0, impulsive_legs / 3.0)
@@ -114,6 +114,8 @@ def find_order_blocks(candles: pd.DataFrame, tf: str, **kwargs):
     df = candles.copy(); df['atr'] = atr(df, period=atr_period); df['range'] = df['high'] - df['low']
     order_blocks = []
     for i in range(1, len(df)):
+        if pd.isna(df['atr'].iloc[i]) or df['atr'].iloc[i] <= 0:
+            continue
         if df['close'].iloc[i-1] < df['open'].iloc[i-1] and df['range'].iloc[i] > impulse_mult * df['atr'].iloc[i] and df['close'].iloc[i] > df['open'].iloc[i]:
             ob_zone = [df['high'].iloc[i-1], df['low'].iloc[i-1]]
             if (ob_zone[0] - ob_zone[1]) > 0 and (ob_zone[0] - ob_zone[1]) < max_width_mult * df['atr'].iloc[i-1]:
@@ -140,15 +142,18 @@ def find_fair_value_gaps(candles: pd.DataFrame, tf: str, **kwargs):
     df['atr'] = atr(df)
     fvgs = []
     for i in range(len(df) - 2):
+        atr_ref = df['atr'].iloc[i+1]
+        if pd.isna(atr_ref) or atr_ref <= 0:
+            continue
+
         if df['low'].iloc[i+2] > df['high'].iloc[i]:
             gap_size = df['low'].iloc[i+2] - df['high'].iloc[i]
-            atr_ref = df['atr'].iloc[i+1] if pd.notna(df['atr'].iloc[i+1]) and df['atr'].iloc[i+1] > 0 else gap_size
-            strength = float(min(1.0, gap_size / max(1e-9, atr_ref)))
-            fvgs.append({'side': 'buy', 'zone': [df['high'].iloc[i], df['low'].iloc[i+2]], 'origin_idx': i + 1, 'strength': strength})
+            strength = float(min(1.0, gap_size / atr_ref))
+            # Consistent zone ordering: [upper, lower]
+            fvgs.append({'side': 'buy', 'zone': [df['low'].iloc[i+2], df['high'].iloc[i]], 'origin_idx': i + 1, 'strength': strength})
         elif df['high'].iloc[i+2] < df['low'].iloc[i]:
             gap_size = df['low'].iloc[i] - df['high'].iloc[i+2]
-            atr_ref = df['atr'].iloc[i+1] if pd.notna(df['atr'].iloc[i+1]) and df['atr'].iloc[i+1] > 0 else gap_size
-            strength = float(min(1.0, gap_size / max(1e-9, atr_ref)))
+            strength = float(min(1.0, gap_size / atr_ref))
             fvgs.append({'side': 'sell', 'zone': [df['low'].iloc[i], df['high'].iloc[i+2]], 'origin_idx': i + 1, 'strength': strength})
     return fvgs
 
@@ -183,39 +188,46 @@ def detect_liquidity_sweep(candles_5m: pd.DataFrame, **kwargs):
 
 def compute_ote(impulsive_leg_candles: pd.DataFrame):
     """
-    Approximate OTE: take recent local extreme (max/min) and compute 61.8-79% zone.
+    Calculates the Optimal Trade Entry (OTE) zone (0.618-0.79 Fibonacci retracement)
+    based on the most recent impulsive move.
     """
     df = impulsive_leg_candles.copy()
     if df.empty or len(df) < 3:
         return {'in_ote': False, 'retrace_pct': 0.0, 'ote_zone': [0, 0], 'score': 0.0}
-    high = df['high'].max()
-    low = df['low'].min()
-    # guess direction by comparing last close to mid
-    if df['close'].iloc[-1] >= (high + low) / 2:
-        # impulsive up move: OTE zone below the high
-        start, end = low, high
-        direction = 'up'
-    else:
-        # impulsive down move: OTE zone above the low
-        start, end = high, low
-        direction = 'down'
 
-    move = end - start
-    if abs(move) < 1e-8:
+    impulse_high = df['high'].max()
+    impulse_low = df['low'].min()
+    price = df['close'].iloc[-1]
+
+    # Determine the direction of the primary impulse
+    is_up_impulse = price >= (impulse_high + impulse_low) / 2
+    
+    move_size = impulse_high - impulse_low
+    if move_size < 1e-8:
         return {'in_ote': False, 'retrace_pct': 0.0, 'ote_zone': [0, 0], 'score': 0.0}
 
-    ote_high = end - 0.618 * move if direction == 'up' else end + 0.618 * move
-    ote_low  = end - 0.79 * move  if direction == 'up' else end + 0.79 * move
-    ote_zone = [max(ote_high, ote_low), min(ote_high, ote_low)]  # [upper, lower]
-    price = df['close'].iloc[-1]
-    in_ote = (ote_zone[1] <= price <= ote_zone[0])
-    # proximity score to center of OTE
-    center = (ote_zone[0] + ote_zone[1]) / 2
-    half_width = max(1e-9, (ote_zone[0] - ote_zone[1]) / 2)
-    proximity = 1.0 - min(1.0, abs(price - center) / half_width)
-    score = float(max(0.0, proximity)) if in_ote else 0.0
-    retrace_pct = abs((price - end) / move)
-    return {'in_ote': bool(in_ote), 'retrace_pct': float(retrace_pct), 'ote_zone': ote_zone, 'score': float(score)}
+    if is_up_impulse:
+        ote_high = impulse_high - 0.618 * move_size
+        ote_low  = impulse_high - 0.79 * move_size
+        retrace_pct = (impulse_high - price) / move_size if move_size > 0 else 0
+    else: # Down impulse
+        ote_high = impulse_low + 0.79 * move_size
+        ote_low  = impulse_low + 0.618 * move_size
+        retrace_pct = (price - impulse_low) / move_size if move_size > 0 else 0
+
+    ote_zone = [ote_high, ote_low]
+    in_ote = (ote_low <= price <= ote_high)
+
+    # Score based on proximity to the 0.705 level (center of the OTE)
+    score = 0.0
+    if in_ote:
+        center = (ote_high + ote_low) / 2
+        half_width = (ote_high - ote_low) / 2
+        if half_width > 1e-9:
+            proximity = 1.0 - min(1.0, abs(price - center) / half_width)
+            score = float(max(0.0, proximity))
+
+    return {'in_ote': bool(in_ote), 'retrace_pct': float(retrace_pct), 'ote_zone': ote_zone, 'score': score}
 
 def detect_breaker_blocks(candles: pd.DataFrame, tf: str):
     """
@@ -290,7 +302,7 @@ def candle_body_confirmation(last_candle: pd.Series, zone, side: str = None):
 
     return {'confirmed': bool(confirmed), 'score': 1.0 if confirmed else 0.0}
 
-def session_and_spread_filter(timestamp, spread: float = 0.0):
+def session_and_spread_filter(spread: float = 0.0):
     """
     Allows/denies signal based on session/time and spread.
     Spread is a placeholder as it's not available in historical data.
@@ -298,6 +310,59 @@ def session_and_spread_filter(timestamp, spread: float = 0.0):
     allowed = True  # Allow 24/7 trading for crypto
     if spread > 0.001: allowed = False
     return {'allowed': allowed, 'score': 1.0 if allowed else 0.0}
+
+def micro_sniper_trigger(df_1m: pd.DataFrame, **kwargs):
+    """
+    Detects a high-probability "sniper" entry based on a micro-timeframe (1m)
+    wick rejection combined with a significant volume spike.
+    """
+    lookback = kwargs.get('lookback', 20)
+    wick_atr_mult = kwargs.get('wick_atr_mult', 0.25)
+    volume_z_k = kwargs.get('volume_z_k', 1.5)
+    atr_period = kwargs.get('atr_period', 14)
+
+    if len(df_1m) < lookback + 2:
+        return {'side': 'neutral', 'score': 0.0, 'meta': {}}
+
+    df = df_1m.copy()
+    df['atr'] = atr(df, period=atr_period)
+
+    hist = df.iloc[-lookback-1:-1] # Historical data for lookback
+    last_candle = df.iloc[-1]      # The current candle to check
+
+    recent_high = hist['high'].max()
+    recent_low = hist['low'].min()
+    atr_val = hist['atr'].iloc[-1] if pd.notna(hist['atr'].iloc[-1]) else None
+    if atr_val is None or atr_val <= 0:
+        return {'side': 'neutral', 'score': 0.0, 'meta': {}}
+    
+    vol_mean = hist['volume'].mean()
+    vol_std = hist['volume'].std()
+
+    if vol_std is None or np.isnan(vol_std) or vol_std == 0: # Avoid division by zero
+        return {'side': 'neutral', 'score': 0.0, 'meta': {}}
+
+    volume_spike = last_candle['volume'] >= (vol_mean + volume_z_k * vol_std)
+
+    # Bearish signal: high wick rejection + volume spike
+    high_wick_overshoot = last_candle['high'] - recent_high
+    if high_wick_overshoot > (wick_atr_mult * atr_val) and last_candle['close'] < recent_high and volume_spike:
+        side = 'sell'
+        wick_score = min(1.0, high_wick_overshoot / atr_val if atr_val > 0 else 1.0)
+        volume_z_score = (last_candle['volume'] - vol_mean) / vol_std
+        score = wick_score * (volume_z_score / 4.0) # Scale to keep it in a reasonable 0-1 range
+        return {'side': side, 'score': float(score), 'meta': {'type': 'wick_rejection_high', 'overshoot': high_wick_overshoot}}
+
+    # Bullish signal: low wick rejection + volume spike
+    low_wick_overshoot = recent_low - last_candle['low']
+    if low_wick_overshoot > (wick_atr_mult * atr_val) and last_candle['close'] > recent_low and volume_spike:
+        side = 'buy'
+        wick_score = min(1.0, low_wick_overshoot / atr_val if atr_val > 0 else 1.0)
+        volume_z_score = (last_candle['volume'] - vol_mean) / vol_std
+        score = wick_score * (volume_z_score / 4.0)
+        return {'side': side, 'score': float(score), 'meta': {'type': 'wick_rejection_low', 'overshoot': low_wick_overshoot}}
+    
+    return {'side': 'neutral', 'score': 0.0, 'meta': {}}
 
 def compute_confluence_score(detection_results: dict, weights: dict):
     """
@@ -313,32 +378,55 @@ def compute_confluence_score(detection_results: dict, weights: dict):
 def plan_entry_action(symbol: str, side: str, composite_score: float, zones: dict, price: float, atr_15m: float, config: dict):
     """
     Plans the entry, stop loss, and take profit based on the strategy rules.
+    Includes special handling for "sniper" entries with tighter stop losses.
     """
-    entry_type = 'market' if composite_score > 3.5 else 'limit'
     entry_price = price
+    stop_loss = 0.0
+    
+    # Check if this is a sniper entry
+    is_sniper_entry = zones.get('micro_sniper_trigger', {}).get('score', 0) > 0.6
+
+    # Determine Entry Price
+    entry_type = 'market' if composite_score > 3.5 else 'limit'
     ob_meta = zones.get('order_block', {}).get('meta')
     if entry_type == 'limit':
         if ob_meta and 'zone' in ob_meta:
             entry_price = (ob_meta['zone'][0] + ob_meta['zone'][1]) / 2.0
-        else: entry_type = 'market' 
-    stop_loss = 0.0
-    if ob_meta and 'zone' in ob_meta:
+        else:
+            entry_type = 'market'
+
+    # Determine Stop Loss
+    if is_sniper_entry:
+        # Tighter SL for sniper entries
+        sl_distance = atr_15m * 0.4 # As suggested by user
+        stop_loss = entry_price - sl_distance if side == 'buy' else entry_price + sl_distance
+    elif ob_meta and 'zone' in ob_meta:
+        # Standard OB-based SL
         buffer = max(config['buffer_atr_mult'] * atr_15m, config['buffer_price_pct'] * price)
         stop_loss = ob_meta['zone'][1] - buffer if side == 'buy' else ob_meta['zone'][0] + buffer
     else:
+        # Fallback SL based on ATR
         sl_distance = 1.2 * atr_15m
-        stop_loss = price - sl_distance if side == 'buy' else price + sl_distance
+        stop_loss = entry_price - sl_distance if side == 'buy' else entry_price + sl_distance
 
-    # --- Minimum SL Guard ---
-    min_sl_dist_pct = config['min_sl_dist_pct']
-    min_sl_dist = price * min_sl_dist_pct
-    if abs(price - stop_loss) < min_sl_dist:
-        if side == 'buy':
-            stop_loss = price - min_sl_dist
-        else:
-            stop_loss = price + min_sl_dist
+    # --- SL Guards ---
+    # 1. Minimum SL distance to avoid zero or tiny SLs
+    min_sl_dist = entry_price * config['min_sl_dist_pct']
+    if abs(entry_price - stop_loss) < min_sl_dist:
+        stop_loss = entry_price - min_sl_dist if side == 'buy' else entry_price + min_sl_dist
+
+    # 2. Maximum SL distance to cap risk, especially for snipes
+    if is_sniper_entry:
+        max_sl_dist = entry_price * config['max_sl_pct']
+        if abs(entry_price - stop_loss) > max_sl_dist:
+            stop_loss = entry_price - max_sl_dist if side == 'buy' else entry_price + max_sl_dist
             
+    # Determine Take Profit targets
     entry_to_sl_dist = abs(entry_price - stop_loss)
+    if entry_to_sl_dist < 1e-9: # Avoid division by zero if SL is at entry
+        return None
+
     tp1 = entry_price + config['tp1_rr'] * entry_to_sl_dist if side == 'buy' else entry_price - config['tp1_rr'] * entry_to_sl_dist
     tp2 = entry_price + config['tp2_rr'] * entry_to_sl_dist if side == 'buy' else entry_price - config['tp2_rr'] * entry_to_sl_dist
+    
     return {'entry_type': entry_type, 'entry_price': entry_price, 'stop_loss': stop_loss, 'targets': [tp1, tp2], 'exit_logic': 'Standard SL/TP with trailing'}
